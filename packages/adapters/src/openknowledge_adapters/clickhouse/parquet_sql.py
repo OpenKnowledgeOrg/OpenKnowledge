@@ -26,6 +26,7 @@ from openknowledge_contracts.tables.fields import fields_of
 # 'https://openalex.org/W' is 22 characters; 19 digits always fit UInt64.
 _WORK_ID = "toUInt64(substring(id, 23))"
 _IS_WORK = "id IS NOT NULL AND match(id, '^https://openalex\\\\.org/W[1-9][0-9]{0,18}$')"
+_IS_SOURCE = "id IS NOT NULL AND match(id, '^https://openalex\\\\.org/S[1-9][0-9]{0,18}$')"
 
 
 def _ids(name: str) -> str:
@@ -83,6 +84,27 @@ SELECTS: Mapping[DatasetName, Mapping[str, str]] = MappingProxyType(
     {
         "works": MappingProxyType(_WORKS),
         "works-abstracts": MappingProxyType({"work_id": _WORK_ID, "abstract": _ABSTRACT}),
+        "sources": MappingProxyType(
+            {
+                "source_id": "toUInt64(substring(id, 23))",
+                **{
+                    name: name
+                    for name in (
+                        "display_name",
+                        "type",
+                        "issn_l",
+                        "host_organization",
+                        "host_organization_name",
+                        "homepage_url",
+                        "is_oa",
+                        "is_in_doaj",
+                        "is_core",
+                        "country_code",
+                    )
+                },
+                "updated_date": "toDateTime(updated_date, 'UTC')",
+            }
+        ),
     }
 )
 
@@ -111,6 +133,10 @@ CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
         "works-abstracts": (
             (_IS_WORK, "openalex_abstracts: id breaks the contract"),
             (_IS_INDEX, "openalex_abstracts: abstract_inverted_index breaks the contract"),
+        ),
+        "sources": (
+            (_IS_SOURCE, "openalex_sources: id breaks the contract"),
+            ("updated_date IS NOT NULL", "openalex_sources: updated_date breaks the contract"),
         ),
     }
 )

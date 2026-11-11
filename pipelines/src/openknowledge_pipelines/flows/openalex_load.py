@@ -15,13 +15,17 @@ from openknowledge_core.ingestion import (
 async def load_release(
     load: Callable[[LoadDataset], Awaitable[LoadDatasetResult]], command: OpenAlexLoad
 ) -> OpenAlexLoadResult:
-    """Each table takes the release only after all its objects loaded, one table after another."""
+    """One table after another, sources first since it takes seconds.
+
+    Each table takes the release only once all its objects loaded.
+    """
 
     def dataset(name: str) -> LoadDataset:
         return LoadDataset(
             release=command.release, dataset=name, bucket=command.bucket, prefix=command.prefix
         )
 
+    sources = await load(dataset("sources"))
     works = await load(dataset("works"))
     abstracts = await load(dataset("works-abstracts"))
-    return OpenAlexLoadResult(works=works, abstracts=abstracts)
+    return OpenAlexLoadResult(sources=sources, works=works, abstracts=abstracts)
