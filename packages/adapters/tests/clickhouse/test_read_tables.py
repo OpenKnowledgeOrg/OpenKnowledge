@@ -674,8 +674,8 @@ async def test_openalex_group_rebuilds_alone_and_records_its_release(
                 f"DELETE FROM {BEST}",
                 f"INSERT INTO {XWALK} ",
                 f"INSERT INTO {BEST} ",
-                "INSERT INTO applied",
                 f"DROP TABLE IF EXISTS {DELTA['openalex']}",
+                "INSERT INTO applied",
             ],
         )
     elif case == "abstracts_behind":

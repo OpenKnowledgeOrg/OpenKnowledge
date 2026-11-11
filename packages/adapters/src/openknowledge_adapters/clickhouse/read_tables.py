@@ -545,10 +545,12 @@ class ClickHouseReadTables:
                         counts[IN],
                     )
                     return touched, None
+            # Dropped before the markers: a kept delta must never carry published keys into the
+            # next window, whose search diff would not rewrite them.
+            await self._client.post(f"DROP TABLE IF EXISTS {DELTA[source]}")
             await self._applied.record_all(
                 [await self._marker(table, end, start, producer, clock) for table in tables]
             )
-            await self._client.post(f"DROP TABLE IF EXISTS {DELTA[source]}")
         seconds = monotonic() - started
         return touched, {
             table: ReadTableResult(rows=written[table], seconds=seconds) for table in tables
