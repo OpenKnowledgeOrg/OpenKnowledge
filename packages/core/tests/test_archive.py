@@ -5,10 +5,12 @@ import json
 
 import pytest
 
+from openknowledge_contracts import sources as sources_module
 from openknowledge_contracts.manifests import DatasetManifest
 from openknowledge_contracts.sources import SOURCES, ArchivedDataset, Source
 from openknowledge_core.ingestion import DownloadDataset, DownloadDatasetService, PinRelease
 from openknowledge_core.ingestion import service as service_module
+from openknowledge_core.ingestion.archive_progress import ArchiveProgress, completion_path
 from openknowledge_core.ingestion.errors import (
     ArchiveConflict,
     ReceiptInvalid,
@@ -300,6 +302,34 @@ async def test_partition_folders_keep_same_named_files_apart(
         f"gs://raw/openalex/{RELEASE}/works/updated_date=2026-10-14/part_0000.parquet",
         f"gs://raw/openalex/{RELEASE}/works/updated_date=2026-10-13/part_0000.parquet",
     ]
+
+
+async def test_partitioned_archives_complete(
+    source: FakeSource, store: FakeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    openalex = Source(
+        name="openalex",
+        prefix="openalex",
+        datasets={"works": ArchivedDataset("parquet", folders=1)},
+        contracts={},
+    )
+    monkeypatch.setattr(sources_module, "SOURCES", {"openalex": openalex})
+    service = DownloadDatasetService(
+        catalog=source,
+        downloads=source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+        source=openalex,
+    )
+    for day in ("2026-10-14", "2026-10-13"):
+        source.add("works", f"updated_date={day}/part_0000.parquet", parquet(10))
+    command = DownloadDataset(release=RELEASE, dataset="works", bucket="raw", prefix="openalex")
+    pinned = await service.pin_dataset(command)
+    for shard in pinned.shards:
+        await service.archive_shard(pinned, shard)
+    await ArchiveProgress(store, service, PRODUCER, clock).finalize(command)
+    assert str(completion_path(command)) in store.objects
 
 
 async def test_flat_shards_with_one_file_name_are_still_refused(

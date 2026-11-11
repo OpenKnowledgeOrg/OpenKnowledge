@@ -21,6 +21,7 @@ from openknowledge_contracts.manifests import (
     Producer,
     Sha256Hex,
 )
+from openknowledge_contracts.sources import archive_folders
 from openknowledge_core.ingestion.commands import (
     BatchDiffDownloadResult,
     DownloadDataset,
@@ -100,6 +101,27 @@ def _completion_identity(
         raise ArchiveConflict("archive completion kind mismatch")
 
 
+def _seed(command: DownloadDataset | DownloadDiff) -> PinnedDataset:
+    if isinstance(command, DownloadDiff):
+        return PinnedDataset(
+            shards=(),
+            release_id=command.release,
+            dataset=command.dataset,
+            bucket=command.bucket,
+            prefix=command.prefix,
+            from_release=command.from_release,
+            part="updates",
+        )
+    return PinnedDataset(
+        shards=(),
+        release_id=command.release,
+        dataset=command.dataset,
+        bucket=command.bucket,
+        prefix=command.prefix,
+        folders=archive_folders(command.dataset),
+    )
+
+
 class ArchiveReader:
     def __init__(self, store: ArtifactStore) -> None:
         self._store = store
@@ -134,15 +156,7 @@ class ArchiveReader:
         command: DownloadDataset | DownloadDiff,
         inventory: HashedRef,
     ) -> tuple[PinnedDataset, ...]:
-        seed = PinnedDataset(
-            shards=(),
-            release_id=command.release,
-            dataset=command.dataset,
-            bucket=command.bucket,
-            prefix=command.prefix,
-            from_release=command.from_release if isinstance(command, DownloadDiff) else None,
-            part="updates" if isinstance(command, DownloadDiff) else None,
-        )
+        seed = _seed(command)
         if inventory.ref.path != seed.inventory_path:
             raise ArchiveConflict("archive inventory path mismatch")
         if isinstance(command, DownloadDiff):
@@ -211,15 +225,7 @@ class ArchiveProgress(ArchiveReader):
         self,
         command: DownloadDataset | DownloadDiff,
     ) -> tuple[HashedRef, tuple[HashedRef, ...]]:
-        seed = PinnedDataset(
-            shards=(),
-            release_id=command.release,
-            dataset=command.dataset,
-            bucket=command.bucket,
-            prefix=command.prefix,
-            from_release=command.from_release if isinstance(command, DownloadDiff) else None,
-            part="updates" if isinstance(command, DownloadDiff) else None,
-        )
+        seed = _seed(command)
         inventory = await self.reference(seed.inventory_path)
         manifests: list[HashedRef] = []
         for part in await self._inventory_parts(command, inventory):
