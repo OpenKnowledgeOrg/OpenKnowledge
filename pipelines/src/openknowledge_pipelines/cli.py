@@ -14,6 +14,7 @@ import click
 from pydantic import BaseModel, ValidationError
 
 from openknowledge_core.ingestion import (
+    ArchiveRelease,
     DownloadDataset,
     DownloadDiff,
     DownloadShard,
@@ -30,6 +31,8 @@ from openknowledge_pipelines.settings import (
     BatchSettings,
     CommonSettings,
     LoadSettings,
+    OpenAlexBatchSettings,
+    OpenAlexSettings,
     PipelineSettings,
     SearchSettings,
     WatchdogSettings,
@@ -59,6 +62,14 @@ OPTION_RULES = {
     "from_release": "--from-release must look like 2026-09-29, the release before --release",
 }
 PIN_RULES = {**OPTION_RULES, "release": "--release must be latest or look like 2026-10-06"}
+OA_RELEASE_HELP = "The release date OpenAlex serves now, such as 2026-10-14."
+OA_PREFIX = "openalex"
+OA_RULES = {
+    **OPTION_RULES,
+    "release": "--release must look like 2026-10-14, the date okp openalex pin printed",
+    "prefix": "--prefix must look like openalex, with no empty, '.' or '..' part",
+}
+OA_PIN_RULES = {**OA_RULES, "release": "--release must be latest or look like 2026-10-14"}
 SETTING_RULES = {
     "OKP_IMAGE_DIGEST": "OKP_IMAGE_DIGEST must be sha256: followed by 64 lowercase hex digits",
     "OKP_S2_API_URL": "OKP_S2_API_URL must be an http or https URL",
@@ -378,6 +389,90 @@ def download_shard(
 
     async def run() -> BaseModel:
         async with bootstrap.open_service(settings) as service:
+            return await service.archive_shard_at(command)
+
+    _run(run, admission_required=not _batch_worker(command.shard))
+
+
+@main.group()
+def openalex() -> None:
+    """OpenAlex snapshots."""
+
+
+@openalex.command("pin", help="Archive the manifest of OpenAlex's release and print it as JSON.")
+@click.option("--release", default="latest", show_default=True, help="Release date, or latest.")
+@click.option("--bucket", required=True, help="Target bucket name, without gs://.")
+@click.option("--prefix", default=OA_PREFIX, show_default=True, help=PREFIX_HELP)
+def openalex_pin(release: str, bucket: str, prefix: str) -> None:
+    command = _command(PinRelease, OA_PIN_RULES, release=release, bucket=bucket, prefix=prefix)
+    settings = _settings(OpenAlexSettings)
+
+    async def run() -> BaseModel:
+        async with bootstrap.open_openalex_service(settings) as service:
+            return await service.pin_release(command)
+
+    _run(run)
+
+
+@openalex.command(
+    "archive",
+    help=(
+        "Archive every dataset of a release through Batch, works first, or only --dataset. "
+        "Rerun it to resume."
+    ),
+)
+@click.option("--release", required=True, help=OA_RELEASE_HELP)
+@click.option("--bucket", required=True, help="Target bucket name, without gs://.")
+@click.option("--prefix", default=OA_PREFIX, show_default=True, help=PREFIX_HELP)
+@click.option("--dataset", help="Archive only this dataset, such as works-deleted.")
+def openalex_archive(release: str, bucket: str, prefix: str, dataset: str | None) -> None:
+    command = _command(
+        ArchiveRelease,
+        OA_RULES,
+        release=release,
+        bucket=bucket,
+        prefix=prefix,
+        dataset=dataset,
+    )
+    from openknowledge_pipelines import deployments
+
+    try:
+        deployments.openalex_datasets(command)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
+    _require_managed_server(())
+    _settings(OpenAlexBatchSettings)
+    _run_managed(lambda: deployments.openalex_batch_download(command))
+
+
+@openalex.command("download-shard", help=DOWNLOAD_SHARD_HELP, short_help=DOWNLOAD_SHARD_HELP)
+@click.option("--release", required=True, help=OA_RELEASE_HELP)
+@click.option("--dataset", required=True, help=DATASET_HELP)
+@click.option(
+    "--shard",
+    required=True,
+    envvar="OKP_SHARD",
+    metavar="N",
+    help="Index into the dataset's archived inventory, dataset.json; Batch tasks set OKP_SHARD.",
+)
+@click.option("--bucket", required=True, help="Target bucket name, without gs://.")
+@click.option("--prefix", default=OA_PREFIX, show_default=True, help=PREFIX_HELP)
+def openalex_download_shard(
+    release: str, dataset: str, shard: str, bucket: str, prefix: str
+) -> None:
+    command = _command(
+        DownloadShard,
+        OA_RULES,
+        release=release,
+        dataset=dataset,
+        shard=shard,
+        bucket=bucket,
+        prefix=prefix,
+    )
+    settings = _settings(OpenAlexSettings)
+
+    async def run() -> BaseModel:
+        async with bootstrap.open_openalex_service(settings) as service:
             return await service.archive_shard_at(command)
 
     _run(run, admission_required=not _batch_worker(command.shard))

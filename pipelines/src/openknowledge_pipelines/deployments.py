@@ -18,7 +18,10 @@ from prefect.deployments.runner import RunnerDeployment
 from prefect.exceptions import ObjectNotFound
 from prefect.types.entrypoint import EntrypointType
 
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
+    ArchiveRelease,
+    ArchiveReleaseResult,
     BatchDiffDownloadResult,
     BatchDownloadResult,
     DownloadDataset,
@@ -39,6 +42,7 @@ from openknowledge_pipelines.flows.sync_observability import SyncObservation
 from openknowledge_pipelines.settings import (
     BatchSettings,
     LoadSettings,
+    OpenAlexBatchSettings,
     ScheduleSettings,
     SyncSettings,
     WatchdogSettings,
@@ -188,6 +192,43 @@ async def s2_batch_download_embeddings_diff(command: DownloadDiff) -> BatchDiffD
     return await _download_diff(command, ArchiveFamily.EMBEDDINGS)
 
 
+@flow(name="openalex-batch-download", persist_result=False)
+async def openalex_batch_download(command: ArchiveRelease) -> ArchiveReleaseResult:
+    """Archive one release, works first, with no S2 limit: OpenAlex has no key to ration."""
+    datasets = openalex_datasets(command)
+    settings = OpenAlexBatchSettings()  # pyright: ignore[reportCallIssue]
+    async with (
+        admission.execution(),
+        bootstrap.open_openalex_download(settings) as (service, jobs),
+    ):
+        flows = bootstrap.batch_download_flows(service, jobs, settings, ArchiveFamily.OPENALEX)
+        return ArchiveReleaseResult(
+            release_id=command.release,
+            datasets=tuple(
+                [
+                    await flows.dataset.fn(
+                        DownloadDataset(
+                            release=command.release,
+                            dataset=dataset,
+                            bucket=command.bucket,
+                            prefix=command.prefix,
+                        )
+                    )
+                    for dataset in datasets
+                ]
+            ),
+        )
+
+
+def openalex_datasets(command: ArchiveRelease) -> tuple[str, ...]:
+    """The datasets to archive: the one asked for, else every registered one, works first."""
+    if command.dataset is not None:
+        require_family(command.dataset, ArchiveFamily.OPENALEX)
+        return (command.dataset,)
+    names = SOURCES["openalex"].datasets
+    return ("works", *(name for name in names if name != "works"))
+
+
 @flow(name="s2-sync", persist_result=False, retries=0)
 async def s2_sync() -> SyncResult:
     settings = SyncSettings()  # pyright: ignore[reportCallIssue]
@@ -276,7 +317,8 @@ def serve() -> None:
             concurrency_limit=1,
         ),
         # Each download deployment queues its own runs. All six compete for S2_LIMIT; busy
-        # runs fail promptly so they do not occupy runner slots while waiting globally.
+        # runs fail promptly so they do not occupy runner slots while waiting globally. The
+        # OpenAlex archive takes no S2_LIMIT, so it never blocks or waits on an S2 sync.
         *(
             RunnerDeployment.from_flow(
                 download,
@@ -292,6 +334,12 @@ def serve() -> None:
                 s2_batch_download_embeddings,
                 s2_batch_download_embeddings_diff,
             )
+        ),
+        RunnerDeployment.from_flow(
+            openalex_batch_download,
+            DEPLOYMENT,
+            entrypoint_type=EntrypointType.MODULE_PATH,
+            concurrency_limit=1,
         ),
         # Every 6 hours, for a log alert; it needs no S2 key, so it takes no limit.
         RunnerDeployment.from_flow(

@@ -12,6 +12,7 @@ from prefect.settings import PREFECT_RESULTS_LOCAL_STORAGE_PATH, temporary_setti
 from openknowledge_contracts.manifests import DatasetManifest
 from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
+    DownloadDataset,
     DownloadDatasetService,
     JobOutcome,
     LoadDataset,
@@ -28,6 +29,7 @@ from openknowledge_core.ingestion.errors import (
     TableUnavailable,
 )
 from openknowledge_core.ingestion.families import ArchiveFamily, archive_family
+from openknowledge_core.ingestion.models import DatasetListing
 from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flows
 from openknowledge_pipelines.flows.s2_download import S2DownloadFlow, s2_download_flow
 from openknowledge_pipelines.flows.s2_load import S2LoadFlow, s2_load_flows
@@ -301,3 +303,38 @@ async def test_refused_inventory_never_cleans_up_or_pins(
             await flows.dataset(COMMAND.model_copy(update={"dataset": "s2orc_v2"}))
     assert (jobs.deleted, jobs.waited, jobs.submitted) == ([], [], [])
     assert not store.objects
+
+
+async def test_a_release_that_flips_mid_archive_writes_no_manifest(
+    oa_service: DownloadDatasetService, oa_source: FakeSource, store: FakeStore
+) -> None:
+    serving = [RELEASE]
+
+    async def list_dataset(release_id: str, dataset: str) -> DatasetListing:
+        if release_id != serving[0]:
+            raise SourceRejected(f"OpenAlex serves release {serving[0]} now, not {release_id}")
+        return await FakeSource.list_dataset(oa_source, release_id, dataset)
+
+    class FlippingJobs(FakeJobs):
+        async def submit(self, job: ShardJob) -> str:
+            name = await super().submit(job.model_copy(update={"shards": job.shards[:1]}))
+            serving[0] = "2027-01-13"
+            self.outcomes[name] = JobOutcome.FAILED
+            return name
+
+    oa_source.list_dataset = list_dataset  # type: ignore[method-assign]
+    jobs = FlippingJobs(oa_service, failing=set())
+    flows = s2_batch_download_flows(
+        oa_service,
+        jobs,
+        family=ArchiveFamily.OPENALEX,
+        rounds=1,
+        task_retries=0,
+        retry_delay_seconds=0,
+    )
+    command = DownloadDataset(release=RELEASE, dataset="works", bucket="raw", prefix="openalex")
+    with pytest.raises(ManifestIncomplete, match="openalex-batch-download/control-vm"):
+        await flows.dataset(command)
+    names = sorted(store.objects)
+    assert any(name.endswith("part_0000.parquet.receipt.json") for name in names)
+    assert not any(name.endswith("works/manifest.json") for name in names)
