@@ -8,7 +8,13 @@ from uuid import UUID
 from pydantic import TypeAdapter
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
-from openknowledge_adapters.clickhouse.crosswalk import XWALK_COLUMNS, expansion_sql, xwalk_select
+from openknowledge_adapters.clickhouse.crosswalk import (
+    BEST_COLUMNS,
+    XWALK_COLUMNS,
+    best_select,
+    expansion_sql,
+    xwalk_select,
+)
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_contracts.manifests import Producer
@@ -31,7 +37,7 @@ from openknowledge_core.ingestion.read_tables import (
     quarterly_marker,
 )
 
-PAPERS, OUT, IN, XWALK = READ_TABLES
+PAPERS, OUT, IN, XWALK, BEST = READ_TABLES
 TABLES = READ_TABLES
 QUERY_ID = "citation-edges"  # Keep the recovery key stable across the rename.
 DELETE_QUERY_ID = "read-tables-delete"
@@ -40,6 +46,7 @@ COLUMNS = {
     OUT: "citing, cited, isinfluential, intents, citationid",
     IN: "citing, cited, isinfluential, intents, citationid",
     XWALK: XWALK_COLUMNS,
+    BEST: BEST_COLUMNS,
 }
 EDGES_IN = f"SELECT {COLUMNS[IN]} FROM {OUT}"
 SOURCES = {
@@ -53,6 +60,8 @@ SOURCES = {
     # One scan of citations: the incoming table is the outgoing one, sorted the other way.
     IN: f"{EDGES_IN}_new",
     XWALK: xwalk_select(None),
+    # The abstracts follow the crosswalk built just before them.
+    BEST: best_select(f"{XWALK}_new", None),
 }
 MEMORY = (
     "SETTINGS max_memory_usage = 8000000000, max_execution_time = 14400, max_insert_threads = 1"
@@ -71,12 +80,15 @@ BLOCKS = {
     IN: EDGE_BLOCKS,
     XWALK: f"{EDGE_BLOCKS}, {SPILL}",
 }
+BLOCKS[BEST] = f"{BLOCKS[PAPERS]}, {SPILL}"
 BYTES_PER_CITATION = 28
 """(4 + 4 + 5.31 + 5.31) bytes for both new copies with IDs, with 50% merge room."""
 BYTES_PER_PAPER = 100
 """Provisional free disk per papers row, pending a measured build."""
 BYTES_PER_XWALK = 40
 """Provisional free disk per papers row, pending a measured build."""
+BYTES_PER_ABSTRACT = 1000
+"""Provisional free disk per abstracts and openalex_abstracts row, pending a measured build."""
 BYTES_PER_IN_ONLY = 14
 """(4 + 5.31) bytes for one new incoming copy with IDs, with 50% merge room."""
 MIN_KEPT = 0.9
@@ -156,15 +168,13 @@ def apply_sql(group: str) -> list[str]:
         f"DELETE FROM {table} WHERE {touched} SETTINGS lightweight_deletes_sync = 2"
         for table in tables
     ]
-    # The incoming edges come from the outgoing ones, which TABLES updates first.
-    selects = {
-        table: f"{EDGES_IN} WHERE {touched}"
-        if table == IN
-        else xwalk_select(keys)
-        if table == XWALK
-        else f"{SOURCES[table]} AND {touched}"
-        for table in tables
+    # The incoming edges and the abstracts follow tables this run updates first.
+    special = {
+        IN: f"{EDGES_IN} WHERE {touched}",
+        XWALK: xwalk_select(keys),
+        BEST: best_select(XWALK, keys),
     }
+    selects = {table: special.get(table, f"{SOURCES[table]} AND {touched}") for table in tables}
     return deletes + [
         f"INSERT INTO {table} ({COLUMNS[table]}) {selects[table]} {SETTINGS}{BLOCKS[table]}"
         for table in tables

@@ -161,21 +161,26 @@ def test_in_only_rebuild_fills_ids_from_out(tmp_path: Path) -> None:
 
 
 @needs_clickhouse
-@pytest.mark.parametrize("source", ["citations", "papers"])
+@pytest.mark.parametrize("source", ["citations", "papers", "openalex"])
 def test_delta_takes_keys_after_start_up_to_end(source: str, tmp_path: Path) -> None:
     complete, capped = (
         ";\n".join(delta_sql(source, "2026-10-01", "2026-10-03", max_keys)) for max_keys in (3, 1)
     )
+    # The openalex keys come from papers and abstracts together.
+    first, second = ("papers", "abstracts") if source == "openalex" else (source, source)
     sql = f"""
         {up()}
-        SYSTEM STOP MERGES {source};
-        INSERT INTO {source} ({KEY[source]}, source_release, is_deleted)
-        VALUES (1, '2026-10-01', 0), (2, '2026-10-02', 0), (3, '2026-10-03', 0),
-               (4, '2026-10-04', 0), (5, '2026-10-02', 1);
-        INSERT INTO {source} ({KEY[source]}, source_release, is_deleted)
+        SYSTEM STOP MERGES {first};
+        SYSTEM STOP MERGES {second};
+        INSERT INTO {first} ({KEY[source]}, source_release, is_deleted)
+        VALUES (1, '2026-10-01', 0), (2, '2026-10-02', 0), (3, '2026-10-03', 0);
+        INSERT INTO {second} ({KEY[source]}, source_release, is_deleted)
+        VALUES (4, '2026-10-04', 0), (5, '2026-10-02', 1);
+        INSERT INTO {second} ({KEY[source]}, source_release, is_deleted)
         VALUES (2, '2026-10-03', 0), (5, '2026-10-03', 1);
         {complete};
         SELECT key FROM {DELTA[source]} ORDER BY key FORMAT JSONEachRow;
+        DROP TABLE {DELTA[source]};
         {capped};
         SELECT count() AS keys FROM {DELTA[source]} FORMAT JSONEachRow;
     """
@@ -313,4 +318,49 @@ def test_best_abstract_prefers_live_s2_then_the_chosen_work(tmp_path: Path) -> N
         {"corpusid": 1, "abstract": "S2 one", "source": "s2", "work_id": None},
         {"corpusid": 2, "abstract": "OA two", "source": "openalex", "work_id": 20},
         {"corpusid": 3, "abstract": "OA three", "source": "openalex", "work_id": 30},
+    ]
+
+
+@needs_clickhouse
+def test_best_abstract_incremental_equals_full_rebuild(tmp_path: Path) -> None:
+    run = [*delta_sql("openalex", "2026-10-01", "2026-10-02", 100), *apply_sql("openalex")]
+    statements = ";\n".join([*run[:-1], *run, *run])
+    group = GROUPS["openalex"]
+    sql = f"""
+        {up()}
+        SYSTEM STOP MERGES papers;
+        SYSTEM STOP MERGES abstracts;
+        INSERT INTO papers (corpusid, externalids, source_release, is_deleted)
+        SELECT number, map('DOI', concat('10.1/', toString(number * 10))), '2026-10-01', 0
+        FROM numbers(1, 5);
+        INSERT INTO openalex_works (work_id, doi_norm, has_abstract, source_release, is_deleted)
+        SELECT number * 10, concat('10.1/', toString(number * 10)), 1, '2026-10-01', 0
+        FROM numbers(1, 6);
+        INSERT INTO openalex_abstracts (work_id, abstract, source_release, is_deleted)
+        SELECT number * 10, concat('OA ', ['one', 'two', 'three', 'four', 'five', 'six'][number]),
+               '2026-10-01', 0
+        FROM numbers(1, 6);
+        INSERT INTO abstracts (corpusid, abstract, source_release, is_deleted)
+        VALUES (1, 'S2 one', '2026-10-01', 0), (3, 'S2 three', '2026-10-01', 0);
+        {_full_build("_new", group)}
+        {_publish(group)}
+        INSERT INTO abstracts (corpusid, abstract, source_release, is_deleted)
+        VALUES (3, '', '2026-10-02', 1), (2, 'S2 two', '2026-10-02', 0);
+        INSERT INTO papers (corpusid, externalids, source_release, is_deleted)
+        VALUES (4, map(), '2026-10-02', 1), (5, map('DOI', '10.1/60'), '2026-10-02', 0);
+        {statements};
+        {_full_build("_new", group)}
+        {_compare(group)}
+    """
+    copies = _copies(sql, tmp_path)
+    assert copies["paper_abstract_best"] == copies["paper_abstract_best_new"]
+    assert copies["paper_xwalk"] == copies["paper_xwalk_new"]
+    assert [
+        (r["corpusid"], r["source"], r["abstract"], r["work_id"])
+        for r in copies["paper_abstract_best"]
+    ] == [
+        (1, "s2", "S2 one", None),
+        (2, "s2", "S2 two", None),
+        (3, "openalex", "OA three", 30),
+        (5, "openalex", "OA six", 60),
     ]
