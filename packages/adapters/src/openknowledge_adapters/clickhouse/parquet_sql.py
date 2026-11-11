@@ -179,14 +179,18 @@ def parquet_duplicates_query(contract: DatasetContract, source: Source = "s3") -
 
     Rows repeat identically when every stored value is the same. One read of all objects keeps
     the plan small for thousands of them, where one read per object exceeds ClickHouse's
-    limit on plan optimizations.
+    limit on plan optimizations. The repeated keys are found from the key column alone; only
+    their rows are hashed whole, so a release's abstracts are not rebuilt again. A rerun of
+    the same query, under the same query id, replaces one its client stopped waiting for.
     """
     selects = SELECTS[contract.name]
-    key = ", ".join(selects[name] for name in contract.key)
+    key = f"tuple({', '.join(selects[name] for name in contract.key)})"
+    files = _source(source, "source_files")
     records = (
-        f"{_with(contract.name)}SELECT tuple({key}) AS record_key, "
+        f"{_with(contract.name)}SELECT {key} AS record_key, "
         f"cityHash64(tuple({', '.join(selects.values())})) AS record_hash\n"
-        f"FROM {_source(source, 'source_files')}"
+        f"FROM {files}\n"
+        f"WHERE {key} IN (SELECT {key} FROM {files} GROUP BY 1 HAVING count() > 1)"
     )
     keys = (
         "SELECT record_key, count() AS n, min(record_hash) != max(record_hash) AS conflicting\n"
@@ -198,7 +202,8 @@ def parquet_duplicates_query(contract: DatasetContract, source: Source = "s3") -
         "    countIf(conflicting) AS conflicting_keys,\n"
         f"    groupArrayIf({EXAMPLES})(toString(record_key), conflicting) AS examples\n"
         f"FROM (\n{keys}\n)\n"
-        f"SETTINGS {_NO_HIVE}"
+        f"SETTINGS {_NO_HIVE}, max_bytes_ratio_before_external_group_by = 0.5, "
+        "replace_running_query = 1"
     )
 
 

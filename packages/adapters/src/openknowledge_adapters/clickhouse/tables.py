@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from uuid import UUID
 
@@ -122,14 +123,18 @@ class ClickHouseTables:
     async def duplicates(self, dataset: DatasetName, objects: Sequence[ObjectPath]) -> Duplicates:
         names = [self._readable(path).name for path in objects]
         contract = _contract(dataset)
+        query_id = None
         if _parquet(contract):
             query, parameters = (
                 parquet_duplicates_query(contract),
                 parquet_duplicates_parameters(names),
             )
+            # The same for a retry, which then replaces a query its client stopped waiting for.
+            glob = parameters["source_files"].encode()
+            query_id = f"duplicates-{contract.table}-{hashlib.sha256(glob).hexdigest()[:32]}"
         else:
             query, parameters = duplicates_query(contract, len(names)), duplicates_parameters(names)
-        rows = await self._client.rows(query, **parameters)
+        rows = await self._client.rows(query, query_id=query_id, **parameters)
         return Duplicates.model_validate(rows[0])
 
     async def mark_removed(self, dataset: DatasetName, release: ReleaseId) -> int:
