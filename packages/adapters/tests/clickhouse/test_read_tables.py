@@ -49,21 +49,30 @@ FULL, INCREMENTAL, CURRENT = ReadTablesPath.FULL, ReadTablesPath.INCREMENTAL, Re
         "stale",
         "papers_moved",
         "openalex_moved",
+        "openalex_unsettled",
     ],
 )
 async def test_read_tables_current_only_for_all_sources(table: str, state: str) -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         query = request.content.decode()
         target = request.url.params.get("param_target", "")
+        loaded = state.startswith("openalex_")
         if "param_table" in request.url.params:
             name = request.url.params["param_table"]
-            found = {"uuid": str(UUID(int=OA_UUID[name])), "total_rows": 100}
+            found = {"uuid": str(UUID(int=OA_UUID[name])), "total_rows": 100 if loaded else 0}
             return httpx.Response(200, text=json.dumps(found))
+        if query.startswith("SELECT count() AS rows FROM"):
+            return httpx.Response(200, text='{"rows": 0}')
         if target in OA_UUID or target == QUARTERLY_XWALK:
-            # A quarterly marker 2026-10-14 on the live crosswalk; OpenAlex now holds 2027-01-13.
-            if state != "openalex_moved":
+            # A quarterly marker 2026-10-14 on the live crosswalk; OpenAlex now holds 2027-01-13,
+            # or, unsettled, only its works table does, so a build skips the group.
+            if not loaded:
                 return httpx.Response(200)
-            release = "2027-01-13" if target in OA_UUID else "2026-10-14"
+            moved = target in OA_UUID and (state, target) != (
+                "openalex_unsettled",
+                "openalex_abstracts",
+            )
+            release = "2027-01-13" if moved else "2026-10-14"
             found = applied_release(target, release, timedelta())
             found = found.model_copy(update={"target_uuid": UUID(int=OA_UUID.get(target, 1))})
             return httpx.Response(200, text=found.model_dump_json())
@@ -99,7 +108,7 @@ async def test_read_tables_current_only_for_all_sources(table: str, state: str) 
         )
         assert await edges.is_current(
             {"papers": NEXT if state == "papers_moved" else RELEASE, "citations": RELEASE}
-        ) is (state == "current_empty")
+        ) is (state in ("current_empty", "openalex_unsettled"))
 
 
 def marker(target: str, release: str, uuid: int = 1, from_release: str | None = None) -> str:
