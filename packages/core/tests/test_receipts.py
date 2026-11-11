@@ -56,6 +56,7 @@ async def test_a_receipt_that_does_not_parse_fails(
     [
         ({"release_id": "2026-09-29"}, "release"),
         ({"dataset": "abstracts"}, "dataset"),
+        ({"source": "openalex"}, "source"),
         (
             {
                 "shard": {

@@ -515,6 +515,7 @@ class DownloadDatasetService:
             ) from None
         target = pinned.object_path(shard)
         expected: dict[str, object] = {
+            "source": self._source.name,
             "release": pinned.release_id,
             "dataset": pinned.dataset,
             "shard": shard,
@@ -522,6 +523,7 @@ class DownloadDatasetService:
             "schema": _schema_ref(self._source, pinned),
         }
         named: dict[str, object] = {
+            "source": receipt.source,
             "release": receipt.release_id,
             "dataset": receipt.dataset,
             "shard": receipt.shard,
