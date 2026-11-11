@@ -18,6 +18,7 @@ from openknowledge_contracts.datasets import (
 from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion.errors import (
     TRANSIENT_STATUSES,
+    DatasetNotInRelease,
     SourceRejected,
     SourceUnavailable,
 )
@@ -96,7 +97,9 @@ class OpenAlexCatalog:
             return DatasetListing(summary=_summary(dataset), links=(link,))
         entity = next((e for e in manifest.entities if e.entity == dataset), None)
         if entity is None:
-            raise SourceRejected(f"release {release_id} of OpenAlex has no dataset {dataset!r}")
+            raise DatasetNotInRelease(
+                f"release {release_id} of OpenAlex has no dataset {dataset!r}"
+            )
         pattern = re.compile(
             rf"s3://openalex/(data/parquet/{re.escape(dataset)}"
             r"/updated_date=\d{4}-\d{2}-\d{2}/[A-Za-z0-9][A-Za-z0-9._-]*\.parquet)"

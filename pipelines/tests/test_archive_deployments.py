@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Literal
 
 import httpx
@@ -11,11 +12,19 @@ from prefect.client.orchestration import PrefectClient
 from prefect.client.schemas.objects import ConcurrencyLeaseHolder
 from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
 
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
     ArchiveRelease,
+    BatchDownloadResult,
+    DownloadDataset,
     DownloadDatasetService,
     ShardJob,
     ShardJobs,
+)
+from openknowledge_core.ingestion.errors import (
+    DatasetNotInRelease,
+    IngestionError,
+    RowCountMismatch,
 )
 from openknowledge_pipelines import admission, bootstrap, deployments
 from openknowledge_pipelines.settings import BatchSettings, LoadSettings, OpenAlexBatchSettings
@@ -317,3 +326,38 @@ async def test_a_second_openalex_archive_is_refused_while_one_runs(
         gate.set()
     assert (await first).datasets[0].dataset == "works"
     assert jobs.deleted == []
+
+
+@pytest.mark.usefixtures("prefect_server")
+async def test_an_openalex_archive_goes_on_past_a_failed_or_unlisted_dataset(
+    monkeypatch: pytest.MonkeyPatch, oa_wired: DownloadDatasetService
+) -> None:
+    tried: list[str] = []
+
+    async def dataset(command: DownloadDataset) -> BatchDownloadResult:
+        tried.append(command.dataset)
+        if command.dataset == "concepts":
+            raise DatasetNotInRelease("release 2026-10-06 of OpenAlex has no dataset 'concepts'")
+        if command.dataset == "authors":
+            raise RowCountMismatch("part_0001.parquet holds 3 rows, the manifest 4")
+        return BatchDownloadResult.model_construct(dataset=command.dataset)
+
+    @asynccontextmanager
+    async def open_openalex_download(
+        settings: OpenAlexBatchSettings,
+    ) -> AsyncGenerator[tuple[DownloadDatasetService, ShardJobs]]:
+        yield oa_wired, FakeJobs(oa_wired, failing=set())
+
+    def flows(*args: object) -> SimpleNamespace:
+        return SimpleNamespace(dataset=SimpleNamespace(fn=dataset))
+
+    monkeypatch.setattr(deployments, "OpenAlexBatchSettings", OpenAlexBatchSettings.model_construct)
+    monkeypatch.setattr(bootstrap, "open_openalex_download", open_openalex_download)
+    monkeypatch.setattr(bootstrap, "batch_download_flows", flows)
+    deployments.ensure_limits()
+    with pytest.raises(IngestionError, match=r"1 datasets failed.*authors \(RowCountMismatch"):
+        await deployments.openalex_batch_download(
+            ArchiveRelease(release="2026-10-06", bucket="raw")
+        )
+    assert tried[:4] == ["works", "sources", "works-deleted", "authors"]
+    assert sorted(tried) == sorted(SOURCES["openalex"].datasets)

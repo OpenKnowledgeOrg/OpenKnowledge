@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 
-from prefect import flow
+from prefect import flow, get_run_logger
 from prefect import serve as prefect_serve
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.actions import DeploymentScheduleCreate, GlobalConcurrencyLimitCreate
@@ -33,7 +33,7 @@ from openknowledge_core.ingestion import (
     WatchdogResult,
 )
 from openknowledge_core.ingestion.coordinator import SyncResult
-from openknowledge_core.ingestion.errors import IngestionError
+from openknowledge_core.ingestion.errors import DatasetNotInRelease, IngestionError
 from openknowledge_core.ingestion.families import ArchiveFamily, require_family
 from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 from openknowledge_pipelines import admission, bootstrap
@@ -204,7 +204,11 @@ async def s2_batch_download_embeddings_diff(command: DownloadDiff) -> BatchDiffD
 
 @flow(name="openalex-batch-download", persist_result=False)
 async def openalex_batch_download(command: ArchiveRelease) -> ArchiveReleaseResult:
-    """Archive one release, works first, under its own limit so S2 runs are never held up."""
+    """Archive one release, what the load reads first, under its own limit apart from S2's.
+
+    A dataset that fails does not stop the ones after it; the run fails at the end, naming
+    each. A registered dataset the release does not list is skipped unless it was asked for.
+    """
     datasets = openalex_datasets(command)
     settings = OpenAlexBatchSettings()  # pyright: ignore[reportCallIssue]
     async with (
@@ -213,31 +217,42 @@ async def openalex_batch_download(command: ArchiveRelease) -> ArchiveReleaseResu
         bootstrap.open_openalex_download(settings) as (service, jobs),
     ):
         flows = bootstrap.batch_download_flows(service, jobs, settings, ArchiveFamily.OPENALEX)
-        return ArchiveReleaseResult(
-            release_id=command.release,
-            datasets=tuple(
-                [
-                    await flows.dataset.fn(
-                        DownloadDataset(
-                            release=command.release,
-                            dataset=dataset,
-                            bucket=command.bucket,
-                            prefix=command.prefix,
-                        )
-                    )
-                    for dataset in datasets
-                ]
-            ),
-        )
+        results: list[BatchDownloadResult] = []
+        failed: list[str] = []
+        for dataset in datasets:
+            download = DownloadDataset(
+                release=command.release,
+                dataset=dataset,
+                bucket=command.bucket,
+                prefix=command.prefix,
+            )
+            try:
+                results.append(await flows.dataset.fn(download))
+            except DatasetNotInRelease as exc:
+                if command.dataset is not None:
+                    raise
+                get_run_logger().warning("%s; skipped", exc)
+            except IngestionError as exc:
+                failed.append(f"{dataset} ({type(exc).__name__}: {exc})")
+        if failed:
+            raise IngestionError(
+                f"release {command.release} of OpenAlex: {len(failed)} datasets failed, the others "
+                f"are archived; rerun to resume: {'; '.join(failed)}"
+            )
+        return ArchiveReleaseResult(release_id=command.release, datasets=tuple(results))
+
+
+# What okp openalex load reads, archived before the other datasets.
+_LOADED_FIRST = ("works", "sources", "works-deleted")
 
 
 def openalex_datasets(command: ArchiveRelease) -> tuple[str, ...]:
-    """The datasets to archive: the one asked for, else every registered one, works first."""
+    """The datasets to archive: the one asked for, else every registered one, loaded ones first."""
     if command.dataset is not None:
         require_family(command.dataset, ArchiveFamily.OPENALEX)
         return (command.dataset,)
     names = SOURCES["openalex"].datasets
-    return ("works", *(name for name in names if name != "works"))
+    return (*_LOADED_FIRST, *(name for name in names if name not in _LOADED_FIRST))
 
 
 @flow(name="s2-sync", persist_result=False, retries=0)
