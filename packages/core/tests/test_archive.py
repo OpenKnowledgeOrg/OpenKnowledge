@@ -6,7 +6,7 @@ import json
 import pytest
 
 from openknowledge_contracts import sources as sources_module
-from openknowledge_contracts.manifests import DatasetManifest
+from openknowledge_contracts.manifests import DatasetManifest, ObjectPath
 from openknowledge_contracts.sources import SOURCES, ArchivedDataset, Source
 from openknowledge_core.ingestion import DownloadDataset, DownloadDatasetService, PinRelease
 from openknowledge_core.ingestion import service as service_module
@@ -18,7 +18,7 @@ from openknowledge_core.ingestion.errors import (
     SourceRejected,
     StoredCopyMismatch,
 )
-from openknowledge_core.ingestion.models import PinnedDataset, release_record_path
+from openknowledge_core.ingestion.models import PinnedDataset, ReleaseDocument, release_record_path
 from openknowledge_core.ingestion.service import SERVED_NOW
 from tests.fakes.ports import (
     COMMAND,
@@ -366,3 +366,20 @@ async def pin_works(
         DownloadDataset(release=RELEASE, dataset="works", bucket="raw", prefix="openalex")
     )
     return service, pinned
+
+
+async def test_release_documents_land_verbatim_and_a_changed_copy_conflicts(
+    service: DownloadDatasetService, source: FakeSource, store: FakeStore
+) -> None:
+    add_papers(source)
+    command = PinRelease(release="latest", bucket="raw", prefix="s2")
+    first = b'{"date": "2026-10-06"}\n'
+    source.documents = (ReleaseDocument(name="manifest.json", data=first),)
+    await service.pin_release(command)
+    path = ObjectPath.under("raw", "s2", RELEASE, "manifest.json")
+    assert store.data(path) == first
+    await service.pin_release(command)
+    changed = b'{"date": "2026-10-06" }\n'
+    source.documents = (ReleaseDocument(name="manifest.json", data=changed),)
+    with pytest.raises(ArchiveConflict, match="manifest.json"):
+        await service.pin_release(command)

@@ -30,6 +30,7 @@ from openknowledge_contracts.datasets import (
     DatasetName,
     DatasetSummary,
     DiffPart,
+    FileName,
     ReleaseId,
     ShardRef,
 )
@@ -68,6 +69,15 @@ class ShardLink(BaseModel):
     url: SecretStr
     size: NonNegativeInt | None = None
     records: NonNegativeInt | None = None
+
+
+class ReleaseDocument(BaseModel):
+    """A file the source publishes about a release, archived byte for byte."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: FileName
+    data: bytes
 
 
 class DatasetListing(BaseModel):

@@ -38,6 +38,7 @@ from openknowledge_core.ingestion.models import (
     LoadObject,
     LoadRecord,
     Operation,
+    ReleaseDocument,
     ShardJob,
     ShardLink,
     StoredObject,
@@ -116,6 +117,7 @@ class FakeSource:
     def __init__(self) -> None:
         self.releases = [RELEASE]
         self.files: dict[str, dict[str, bytes]] = {}
+        self.documents: tuple[ReleaseDocument, ...] = ()
         self.readme = "Terms of use for the release."
         self.listings = 0
         self.resolved: list[str] = []
@@ -158,6 +160,9 @@ class FakeSource:
                 ],
             }
         )
+
+    async def release_documents(self, release_id: str) -> tuple[ReleaseDocument, ...]:
+        return self.documents
 
     async def list_dataset(self, release_id: str, dataset: str) -> DatasetListing:
         self.listings += 1
