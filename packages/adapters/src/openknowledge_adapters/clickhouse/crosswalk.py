@@ -85,10 +85,40 @@ def ranked_sql(keys: str | None) -> str:
 
 
 def xwalk_select(keys: str | None) -> str:
-    """The ``paper_xwalk`` rows of the papers in ``keys``, or of every live paper."""
+    """The ``paper_xwalk`` rows of the papers in ``keys``, or of every live paper.
+
+    With ``keys``, it runs after their rows were deleted, so the other papers choosing the same
+    work are counted from the table.
+    """
+    if keys is None:
+        return (
+            f"SELECT corpusid, work_id, CAST(key_order AS {MATCH_KEY}) AS match_key, rank, "
+            "rank = 1 AS chosen, "
+            "rank = 1 AND countIf(rank = 1) OVER (PARTITION BY work_id) > 1 AS shared_work "
+            f"FROM ({ranked_sql(None)})"
+        )
+    ranked = ranked_sql(keys)
     return (
-        f"SELECT corpusid, work_id, CAST(key_order AS {MATCH_KEY}) AS match_key, rank, "
-        "rank = 1 AS chosen, "
-        "rank = 1 AND countIf(rank = 1) OVER (PARTITION BY work_id) > 1 AS shared_work "
-        f"FROM ({ranked_sql(keys)})"
+        f"SELECT c.corpusid, c.work_id, CAST(c.key_order AS {MATCH_KEY}) AS match_key, c.rank, "
+        "c.rank = 1 AS chosen, "
+        "c.rank = 1 AND countIf(c.rank = 1) OVER (PARTITION BY c.work_id) + o.others > 1 "
+        f"AS shared_work FROM ({ranked}) AS c LEFT JOIN ("
+        "SELECT work_id, count() AS others FROM paper_xwalk "
+        f"WHERE chosen AND corpusid NOT IN ({keys}) "
+        f"AND work_id IN (SELECT work_id FROM ({ranked}) WHERE rank = 1) "
+        "GROUP BY work_id) AS o ON o.work_id = c.work_id"
+    )
+
+
+def expansion_sql(delta: str) -> str:
+    """The papers outside ``delta`` that choose a work a delta paper chose or will choose.
+
+    Their own choice cannot change, since their inputs did not, so one pass closes the set.
+    """
+    keys = f"SELECT key FROM {delta}"
+    return (
+        "SELECT DISTINCT corpusid FROM paper_xwalk "
+        f"WHERE chosen AND corpusid NOT IN ({keys}) AND work_id IN ("
+        f"SELECT work_id FROM paper_xwalk WHERE chosen AND corpusid IN ({keys}) "
+        f"UNION DISTINCT SELECT work_id FROM ({ranked_sql(keys)}) WHERE rank = 1)"
     )
