@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from openknowledge_adapters.clickhouse.load_sql import (
+    EXAMPLES,
     Check,
     Source,
     identifier,
@@ -135,6 +136,36 @@ def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> st
         f"SELECT\n    {selected}\n"
         f"FROM {_source(source)}\n"
         f"WHERE {where}"
+    )
+
+
+def parquet_duplicates_query(contract: DatasetContract, objects: int, source: Source = "s3") -> str:
+    """Keys that repeat across the objects ``source_file_0`` to ``source_file_<objects - 1>``.
+
+    Rows repeat identically when every stored value is the same. Each object is read with
+    ``SELECT *`` so the query stays short for thousands of objects; ClickHouse still reads only
+    the Parquet columns the hash uses.
+    """
+    selects = SELECTS[contract.name]
+    key = ", ".join(selects[name] for name in contract.key)
+    files = "\n    UNION ALL\n    ".join(
+        f"SELECT * FROM {_source(source, f'source_file_{index}')}" for index in range(objects)
+    )
+    records = (
+        f"{_with(contract.name)}SELECT tuple({key}) AS record_key, "
+        f"cityHash64(tuple({', '.join(selects.values())})) AS record_hash\n"
+        f"FROM (\n    {files}\n)"
+    )
+    keys = (
+        "SELECT record_key, count() AS n, min(record_hash) != max(record_hash) AS conflicting\n"
+        f"FROM (\n{records}\n)\nGROUP BY record_key\nHAVING n > 1"
+    )
+    return (
+        "SELECT\n"
+        "    sumIf(n - 1, NOT conflicting) AS identical_rows,\n"
+        "    countIf(conflicting) AS conflicting_keys,\n"
+        f"    groupArrayIf({EXAMPLES})(toString(record_key), conflicting) AS examples\n"
+        f"FROM (\n{keys}\n)"
     )
 
 
