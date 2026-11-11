@@ -232,7 +232,7 @@ def _batch_config(
 def batch_download_flows(
     service: DownloadDatasetService,
     jobs: ShardJobs,
-    settings: BatchSettings,
+    settings: BatchJobSettings,
     family: ArchiveFamily = ArchiveFamily.CORE,
 ) -> S2BatchDownloadFlows:
     from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flows

@@ -20,8 +20,8 @@ from prefect.settings import (
 from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import DownloadDatasetService
 from openknowledge_pipelines import admission, bootstrap
-from openknowledge_pipelines.settings import PipelineSettings
-from tests.fakes.ports import PAPERS, PRODUCER, FakeSource, FakeStore, clock
+from openknowledge_pipelines.settings import OpenAlexSettings, PipelineSettings
+from tests.fakes.ports import PAPERS, PRODUCER, FakeSource, FakeStore, clock, gz, parquet
 
 
 @pytest.fixture(scope="session")
@@ -92,3 +92,48 @@ def wired(
     monkeypatch.setenv("S2_API_KEY", "test-key")
     monkeypatch.setenv("OKP_TASK_RETRY_DELAY_SECONDS", "0")
     return service
+
+
+@pytest.fixture
+def oa_source() -> FakeSource:
+    fake = FakeSource()
+    for dataset, spec in SOURCES["openalex"].datasets.items():
+        if spec.format == "parquet":
+            fake.add(dataset, "updated_date=2026-10-05/part_0000.parquet", parquet(10))
+            fake.add(dataset, "updated_date=2026-10-05/part_0001.parquet", parquet(4))
+        else:
+            fake.add(dataset, "deleted_ids.csv.gz", gz(b"W1\n"))
+    return fake
+
+
+@pytest.fixture
+def oa_service(oa_source: FakeSource, store: FakeStore) -> DownloadDatasetService:
+    return DownloadDatasetService(
+        catalog=oa_source,
+        downloads=oa_source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+        source=SOURCES["openalex"],
+    )
+
+
+@pytest.fixture
+def oa_wired(
+    monkeypatch: pytest.MonkeyPatch, oa_service: DownloadDatasetService
+) -> DownloadDatasetService:
+    @asynccontextmanager
+    async def open_openalex_service(
+        settings: OpenAlexSettings,
+    ) -> AsyncGenerator[DownloadDatasetService]:
+        yield oa_service
+
+    @asynccontextmanager
+    async def admitted() -> AsyncGenerator[None]:
+        yield
+
+    monkeypatch.setattr(admission, "execution", admitted)
+    monkeypatch.setattr(bootstrap, "open_openalex_service", open_openalex_service)
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    monkeypatch.setenv("OKP_TASK_RETRY_DELAY_SECONDS", "0")
+    return oa_service

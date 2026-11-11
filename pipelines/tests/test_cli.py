@@ -22,11 +22,16 @@ from prefect.deployments.runner import RunnerDeployment
 from prefect.flows import load_flow_from_entrypoint
 from prefect.settings import PREFECT_API_URL, Profile, temporary_settings
 
+from openknowledge_adapters import batch
+from openknowledge_adapters.batch.jobs import job_spec
+from openknowledge_contracts.manifests import ObjectPath, ShardReceipt
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
     DownloadDataset,
     DownloadDatasetService,
     DownloadDiff,
     LoadDatasetService,
+    ShardJob,
     WatchdogResult,
     WatchdogService,
 )
@@ -42,6 +47,7 @@ from tests.fakes.ports import (
     PRODUCER,
     RELEASE,
     FakeApplied,
+    FakeJobs,
     FakeSource,
     FakeStore,
     FakeTables,
@@ -76,6 +82,11 @@ BATCH_ENV = {
 
 def okp(*args: str) -> tuple[int, str]:
     result = CliRunner().invoke(cli.main, ["s2", *args])
+    return result.exit_code, result.output
+
+
+def okp_oa(*args: str, env: dict[str, str] | None = None) -> tuple[int, str]:
+    result = CliRunner().invoke(cli.main, ["openalex", *args], env=env)
     return result.exit_code, result.output
 
 
@@ -212,11 +223,12 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_batch_download_fulltext_diff,
         deployments.s2_batch_download_embeddings,
         deployments.s2_batch_download_embeddings_diff,
+        deployments.openalex_batch_download,
         deployments.watchdog,
     ]
-    assert [found.concurrency_limit for found in served] == [1] * 10 + [None]
+    assert [found.concurrency_limit for found in served] == [1] * 11 + [None]
     _coordinator, *unscheduled, watchdog = served
-    assert [found.schedules for found in unscheduled] == [[]] * 9
+    assert [found.schedules for found in unscheduled] == [[]] * 10
     [scheduled] = cast("list[DeploymentScheduleCreate]", watchdog.schedules)
     assert isinstance(scheduled.schedule, CronSchedule)
     # from_flow stores no timezone for a cron, and the server reads None as UTC.
@@ -873,3 +885,123 @@ def test_search_cli_runs_the_managed_flow(monkeypatch: pytest.MonkeyPatch, outco
     else:
         assert run.name in result.output and str(run.id) in result.output
         assert ("Completed" if outcome == "completed" else "Failed") in result.output
+
+
+OPENALEX_RELEASE = "2026-10-06"
+OA_TARGET = ["--bucket", "raw"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [[], ["pin"], ["archive"], ["download-shard"]],
+    ids=lambda args: " ".join(args) or "group",
+)
+def test_openalex_helps_work_with_an_empty_environment(
+    monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> None:
+    for name in (*BATCH_ENV, "OKP_SHARD"):
+        monkeypatch.delenv(name, raising=False)
+    code, output = okp_oa(*args, "--help")
+    assert code == 0, output
+
+
+@pytest.mark.usefixtures("oa_wired")
+def test_openalex_pin_archives_the_manifest_under_openalex(store: FakeStore) -> None:
+    code, output = okp_oa("pin", "--release", OPENALEX_RELEASE, *OA_TARGET)
+    assert code == 0, output
+    assert json.loads(output)["record"]["name"] == f"openalex/{OPENALEX_RELEASE}/release.json"
+
+
+@pytest.mark.usefixtures("oa_wired")
+def test_openalex_download_shard_archives_without_an_s2_key(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    monkeypatch.setenv("OKP_SHARD", "0")
+    code, output = okp_oa(
+        "download-shard", "--release", OPENALEX_RELEASE, "--dataset", "works", *OA_TARGET
+    )
+    assert code == 0, output
+    receipt = ShardReceipt.from_json(
+        store.data(ObjectPath.model_validate(json.loads(output)["receipt"]))
+    )
+    assert (receipt.source, receipt.gzip_members, receipt.records) == ("openalex", 0, 10)
+
+
+@pytest.mark.usefixtures("oa_wired")
+def test_a_batch_job_carries_arguments_that_download_shard_parses(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    config = batch.BatchConfig(
+        project="p",
+        region="europe-west4",
+        service_account="download@p.iam.gserviceaccount.com",
+        network="n",
+        subnetwork="s",
+        image="repo/pipelines@sha256:" + "a" * 64,
+        machine_type="e2-standard-2",
+        parallelism=8,
+        max_run_seconds=3600,
+        poll_seconds=0.01,
+        environment={},
+        secrets={},
+    )
+    job = ShardJob(
+        source="openalex",
+        release_id=OPENALEX_RELEASE,
+        dataset="authors",
+        bucket="raw",
+        prefix="openalex",
+        shards=(1,),
+    )
+    group = job_spec(config, job)["taskGroups"][0]
+    [runnable] = group["taskSpec"]["runnables"]
+    group_name, *args = runnable["container"]["commands"]
+    env = {
+        **group["taskEnvironments"][0]["variables"],
+        "OKP_BATCH_OPERATION_ID": job.operation_id.hex,
+        "BATCH_TASK_INDEX": "0",
+        "BATCH_TASK_COUNT": "1",
+    }
+
+    @asynccontextmanager
+    async def refused() -> AsyncGenerator[None]:
+        pytest.fail("a Batch task runs inside its operation's admission")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(admission, "execution", refused)
+    result = CliRunner().invoke(cli.main, [group_name, *args], env=env)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["receipt"]["name"].startswith(
+        f"openalex/{OPENALEX_RELEASE}/authors/updated_date="
+    )
+
+
+@pytest.mark.usefixtures("prefect_server")
+def test_openalex_archive_covers_every_dataset_with_works_first(
+    monkeypatch: pytest.MonkeyPatch, oa_wired: DownloadDatasetService
+) -> None:
+    jobs = FakeJobs(oa_wired, failing=set())
+
+    @asynccontextmanager
+    async def open_openalex_download(settings: object) -> AsyncGenerator[tuple[object, FakeJobs]]:
+        yield oa_wired, jobs
+
+    monkeypatch.setattr(bootstrap, "open_openalex_download", open_openalex_download)
+    for name, value in BATCH_ENV.items():
+        if name not in ("S2_API_KEY", "OKP_BATCH_S2_KEY_SECRET"):
+            monkeypatch.setenv(name, value)
+    code, output = okp_oa("archive", "--release", OPENALEX_RELEASE, *OA_TARGET)
+    assert code == 0, output
+    done = [result["dataset"] for result in json.loads(output.splitlines()[-1])["datasets"]]
+    assert done[0] == "works"
+    assert sorted(done) == sorted(SOURCES["openalex"].datasets)
+    assert {job.dataset for job in jobs.jobs} == set(done)
+
+
+@pytest.mark.usefixtures("oa_wired")
+def test_openalex_archive_refuses_a_dataset_it_does_not_archive() -> None:
+    code, output = okp_oa(
+        "archive", "--release", OPENALEX_RELEASE, "--dataset", "papers", *OA_TARGET
+    )
+    assert code == 2
+    assert "Unsupported archive dataset: papers" in output
