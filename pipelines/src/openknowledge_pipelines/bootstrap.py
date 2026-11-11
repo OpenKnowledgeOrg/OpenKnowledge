@@ -299,7 +299,9 @@ async def open_sync(
             applied=ch.applied,
             progress=progress,
             downloads={
-                dataset: batch_download_flows(service, jobs, settings, archive_family(dataset))
+                dataset: batch_download_flows(
+                    service, jobs, settings, archive_family(dataset, "semantic-scholar")
+                )
                 for dataset in (*CORE_ORDER, *LARGE_ORDER)
             },
             loads=load_flows(loader, settings),

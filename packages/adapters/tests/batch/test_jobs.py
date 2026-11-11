@@ -31,7 +31,12 @@ CONFIG = batch.BatchConfig(
     secrets={"S2_API_KEY": SECRET},
 )
 JOB = ShardJob(
-    release_id="2026-10-06", dataset="s2orc_v2", bucket="raw", prefix="s2", shards=(3, 7)
+    source="semantic-scholar",
+    release_id="2026-10-06",
+    dataset="s2orc_v2",
+    bucket="raw",
+    prefix="s2",
+    shards=(3, 7),
 )
 
 
@@ -266,6 +271,7 @@ def test_base_and_diff_labels_and_task_budget(
     dataset: str, family: str, part: DiffPart | None
 ) -> None:
     job = ShardJob(
+        source="semantic-scholar",
         release_id="2026-10-13",
         dataset=dataset,
         bucket="raw",

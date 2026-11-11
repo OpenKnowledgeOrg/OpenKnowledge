@@ -373,7 +373,7 @@ class ShardJob(BaseModel):
 
     operation_id: UUID = Field(default_factory=uuid4)
     """One logical submission, retained across retries and renewed for the next round."""
-    source: SourceName = "semantic-scholar"
+    source: SourceName
     release_id: ReleaseId
     dataset: DatasetName
     bucket: BucketName

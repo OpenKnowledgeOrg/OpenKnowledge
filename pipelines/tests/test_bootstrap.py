@@ -9,7 +9,13 @@ from openknowledge_adapters import batch, gcs, semantic_scholar
 from openknowledge_adapters.openalex import OpenAlexCatalog
 from openknowledge_core.ingestion import DownloadDatasetService, ShardJobs
 from openknowledge_pipelines import bootstrap
-from openknowledge_pipelines.settings import BatchSettings, OpenAlexBatchSettings, PipelineSettings
+from openknowledge_pipelines.settings import (
+    BatchJobSettings,
+    BatchSettings,
+    OpenAlexBatchSettings,
+    PipelineSettings,
+    SyncSettings,
+)
 from tests.fakes.ports import FakeStore
 
 DIGEST = "sha256:" + "a" * 64
@@ -141,3 +147,23 @@ async def test_the_openalex_download_is_wired_for_openalex_without_the_s2_key(
     [config] = seen
     assert (config.parallelism, config.secrets) == (3, {})
     assert config.environment == {"OKP_IMAGE_DIGEST": DIGEST}
+
+
+S2_AND_LOAD_ENV = {
+    "S2_API_KEY": "k",
+    "OKP_BATCH_S2_KEY_SECRET": "projects/p/secrets/s2-api-key/versions/latest",
+    "OKP_CLICKHOUSE_URL": "http://clickhouse:8123",
+    "CLICKHOUSE_PASSWORD": "dev",
+    "OKP_CLICKHOUSE_RAW_BUCKET": "raw",
+}
+
+
+@pytest.mark.parametrize("settings_class", [BatchSettings, SyncSettings, OpenAlexBatchSettings])
+def test_every_batch_settings_class_requires_the_image_digest(
+    monkeypatch: pytest.MonkeyPatch, settings_class: type[BatchJobSettings]
+) -> None:
+    for name, value in {**BATCH_JOB_ENV, **S2_AND_LOAD_ENV}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("OKP_IMAGE_DIGEST")
+    with pytest.raises(ValidationError, match="image_digest"):
+        settings_class()  # pyright: ignore[reportCallIssue]
