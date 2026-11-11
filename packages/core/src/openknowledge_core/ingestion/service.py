@@ -29,7 +29,7 @@ from openknowledge_contracts.manifests import (
     Producer,
     ShardReceipt,
 )
-from openknowledge_contracts.sources import Source
+from openknowledge_contracts.sources import ArchivedDataset, Source
 from openknowledge_core.ingestion.commands import (
     DownloadDataset,
     DownloadDatasetResult,
@@ -41,6 +41,7 @@ from openknowledge_core.ingestion.commands import (
 )
 from openknowledge_core.ingestion.errors import (
     ArchiveConflict,
+    DatasetNotArchived,
     GzipInvalid,
     IncompleteTransfer,
     IntegrityError,
@@ -135,6 +136,7 @@ class DownloadDatasetService:
 
     async def pin_dataset(self, command: DownloadDataset) -> PinnedDataset:
         """A stored inventory wins over a fresh listing, which only has to name the same shards."""
+        self._dataset_spec(command.dataset)
         await self.pin_release(
             PinRelease(release=command.release, bucket=command.bucket, prefix=command.prefix)
         )
@@ -182,6 +184,7 @@ class DownloadDatasetService:
 
     async def pin_diff(self, command: DownloadDiff) -> PinnedDiff:
         """A stored diff.json wins over a fresh listing, which only has to name the same files."""
+        self._dataset_spec(command.dataset)
         await self.pin_release(
             PinRelease(release=command.release, bucket=command.bucket, prefix=command.prefix)
         )
@@ -231,6 +234,7 @@ class DownloadDatasetService:
         """Leave ``shard`` archived with a valid receipt: verified, recovered or downloaded."""
         if shard not in pinned.shards:
             raise ShardNotListed(f"{shard.file_name} is not in {pinned.inventory_path}")
+        self._dataset_spec(pinned.dataset)
         receipt = await self._store.stat(pinned.receipt_path(shard))
         if receipt is not None:
             await self._verify_receipt(pinned, shard, receipt)
@@ -399,8 +403,17 @@ class DownloadDatasetService:
         await self._write_receipt(pinned, shard, stored, check.report)
         return True
 
+    def _dataset_spec(self, dataset: str) -> ArchivedDataset:
+        spec = self._source.datasets.get(dataset)
+        if spec is None:
+            raise DatasetNotArchived(
+                f"{self._source.name} does not archive {dataset!r}; "
+                "add it to the source registry first"
+            )
+        return spec
+
     def _is_parquet(self, pinned: PinnedDataset) -> bool:
-        return self._source.datasets[pinned.dataset].format == "parquet"
+        return self._dataset_spec(pinned.dataset).format == "parquet"
 
     async def _open(self, pinned: PinnedDataset, shard: ShardRef) -> tuple[ByteStream, ShardLink]:
         try:

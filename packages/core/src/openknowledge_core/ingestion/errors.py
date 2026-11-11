@@ -40,6 +40,10 @@ class LinkExpired(IngestionError):
     """A signed link no longer works and needs a fresh listing."""
 
 
+class DatasetNotArchived(IngestionError):
+    """The source registry does not list the requested dataset."""
+
+
 class ShardNotListed(IngestionError):
     pass
 

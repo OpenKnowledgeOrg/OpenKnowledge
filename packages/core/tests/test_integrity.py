@@ -112,7 +112,8 @@ def test_parquet_check_counts_footer_rows_in_any_chunking(
     check = ParquetCheck(expected_records=1000)
     for start in range(0, len(data), step):
         check.update(data[start : start + step])
-        assert check.tail_size <= 1024 + 8
+        check.update(b"")
+        assert len(check._tail) <= 1024 + 8  # pyright: ignore[reportPrivateUsage]
     report = check.finish(len(data))
     assert (report.records, report.gzip_members, report.size) == (1000, 0, len(data))
     assert report.sha256 == hashlib.sha256(data).hexdigest()
