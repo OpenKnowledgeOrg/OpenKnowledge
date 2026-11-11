@@ -204,18 +204,21 @@ class ClickHouseReadTables:
         """Touched keys over this count rebuild in full: an update holds them all in memory."""
 
     async def is_current(self, releases: Mapping[str, ReleaseId]) -> bool:
+        """Whether a build would change nothing; a group it would skip is not checked."""
         live = await self._live()
-        for table in TABLES:
-            applied = await self._applied.latest(table)
-            if (
-                applied is None
-                or applied.release != releases.get(SOURCE_OF[table])
-                or live.get(table) != applied.target_uuid
-            ):
-                return False
         openalex = await self._openalex()
-        for group, source in QUARTERLY.items():
-            if not await self._quarterly_current(group, live, held_release(*openalex[source])):
+        for group in await self._groups(openalex):
+            for table in GROUPS[group]:
+                applied = await self._applied.latest(table)
+                if (
+                    applied is None
+                    or applied.release != releases.get(SOURCE_OF[table])
+                    or live.get(table) != applied.target_uuid
+                ):
+                    return False
+            if group in QUARTERLY and not await self._quarterly_current(
+                group, live, held_release(*openalex[QUARTERLY[group]])
+            ):
                 return False
         return True
 
@@ -252,7 +255,7 @@ class ClickHouseReadTables:
         held = {table: held_release(*found) for table, found in openalex.items()}
         if (release := held["openalex_works"]) is not None:
             releases["openalex_works"] = release
-        groups = [name for name in GROUPS if name != "openalex" or await self._settled(openalex)]
+        groups = await self._groups(openalex)
         plans: dict[str, GroupPlan] = {}
         if not full:
             async with self._stage("read tables: recovery and plan"):
@@ -307,6 +310,12 @@ class ClickHouseReadTables:
             paths={name: plans[name].path for name in groups},
             touched=touched,
         )
+
+    async def _groups(
+        self, openalex: Mapping[str, tuple[TableState, AppliedRelease | None]]
+    ) -> list[str]:
+        """The groups a build brings current: a quarterly group waits for a settled load."""
+        return [name for name in GROUPS if name not in QUARTERLY or await self._settled(openalex)]
 
     async def _openalex(self) -> dict[str, tuple[TableState, AppliedRelease | None]]:
         found: dict[str, tuple[TableState, AppliedRelease | None]] = {}
