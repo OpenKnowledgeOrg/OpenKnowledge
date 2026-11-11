@@ -87,7 +87,8 @@ BYTES_PER_PAPER = 100
 BYTES_PER_XWALK = 40
 """Provisional free disk per papers row, pending a measured build."""
 BYTES_PER_ABSTRACT = 1000
-"""Provisional free disk per abstracts and openalex_abstracts row, pending a measured build."""
+"""Provisional free disk per papers row, pending a measured build: at most one abstract per live
+paper, however many OpenAlex abstracts or unmerged versions the sources hold."""
 BYTES_PER_IN_ONLY = 14
 """(4 + 5.31) bytes for one new incoming copy with IDs, with 50% merge room."""
 MIN_KEPT = 0.9
@@ -691,8 +692,7 @@ class ClickHouseReadTables:
     async def _preflight(self, groups: tuple[str, ...]) -> dict[str, int]:
         """Check the read tables of ``groups`` and capacity; return their live row counts."""
         tables = tuple(table for group in groups for table in GROUPS[group])
-        sources = ("papers", "citations", "abstracts", "openalex_abstracts")
-        names = ", ".join(f"'{name}'" for name in (*sources, *tables))
+        names = ", ".join(f"'{name}'" for name in ("papers", "citations", *tables))
         rows = await self._client.rows(
             "SELECT name, total_rows FROM system.tables WHERE database = currentDatabase() "
             f"AND name IN ({names})"
@@ -705,11 +705,7 @@ class ClickHouseReadTables:
         per_row = {
             "papers": {"papers": BYTES_PER_PAPER},
             "citations": {"citations": BYTES_PER_CITATION},
-            "openalex": {
-                "papers": BYTES_PER_XWALK,
-                "abstracts": BYTES_PER_ABSTRACT,
-                "openalex_abstracts": BYTES_PER_ABSTRACT,
-            },
+            "openalex": {"papers": BYTES_PER_XWALK + BYTES_PER_ABSTRACT},
         }
         await self._require_free(
             sum(
