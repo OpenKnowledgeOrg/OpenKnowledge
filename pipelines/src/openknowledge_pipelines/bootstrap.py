@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from openknowledge_adapters import batch, clickhouse, gcs, opensearch, semantic_scholar
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
     LoadDatasetService,
@@ -65,6 +66,7 @@ async def open_service(settings: PipelineSettings) -> AsyncGenerator[DownloadDat
             store=store,
             producer=producer(settings),
             clock=lambda: datetime.now(UTC),
+            source=SOURCES["semantic-scholar"],
         )
 
 

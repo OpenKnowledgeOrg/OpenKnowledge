@@ -4,9 +4,20 @@ import zlib
 
 import pytest
 
-from openknowledge_core.ingestion.errors import GzipInvalid, IncompleteTransfer
-from openknowledge_core.ingestion.integrity import MAX_OUTPUT_STEP, GzipCheck, StreamCheck
-from tests.fakes.ports import gz
+from openknowledge_core.ingestion import integrity
+from openknowledge_core.ingestion.errors import (
+    GzipInvalid,
+    IncompleteTransfer,
+    ParquetInvalid,
+    RowCountMismatch,
+)
+from openknowledge_core.ingestion.integrity import (
+    MAX_OUTPUT_STEP,
+    GzipCheck,
+    ParquetCheck,
+    StreamCheck,
+)
+from tests.fakes.ports import gz, parquet
 
 
 @pytest.mark.parametrize(
@@ -17,7 +28,7 @@ from tests.fakes.ports import gz
     ],
 )
 def test_gzip_check_accepts_whole_streams_in_any_chunking(data: bytes) -> None:
-    for step in (1, 7, 4096, len(data)):
+    for step in (1, 7, 1024, len(data)):
         check = GzipCheck()
         for start in range(0, len(data), step):
             check.update(data[start : start + step])
@@ -89,3 +100,32 @@ def test_stream_check_compares_the_declared_length() -> None:
     with pytest.raises(IncompleteTransfer, match="where 999 were due"):
         check.finish(999)
     assert check.report is None
+
+
+@pytest.mark.parametrize("step", [1, 7, 1 << 20])
+def test_parquet_check_counts_footer_rows_in_any_chunking(
+    step: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(integrity, "MAX_FOOTER", 1024)  # small, so the file outgrows the tail
+    data = parquet(rows=1000, row_group_size=300)
+    assert len(data) > 2 * 1024
+    check = ParquetCheck(expected_records=1000)
+    for start in range(0, len(data), step):
+        check.update(data[start : start + step])
+        check.update(b"")
+        assert len(check._tail) <= 1024 + 8  # pyright: ignore[reportPrivateUsage]
+    report = check.finish(len(data))
+    assert (report.records, report.gzip_members, report.size) == (1000, 0, len(data))
+    assert report.sha256 == hashlib.sha256(data).hexdigest()
+
+
+def test_parquet_check_refuses_a_truncated_file_and_a_footer_unlike_the_manifest() -> None:
+    data = parquet(rows=10, row_group_size=5)
+    truncated = ParquetCheck()
+    truncated.update(data[:-1])
+    with pytest.raises(ParquetInvalid):
+        truncated.finish(len(data) - 1)
+    wrong = ParquetCheck(expected_records=11)
+    wrong.update(data)
+    with pytest.raises(RowCountMismatch, match="10 rows.*11"):
+        wrong.finish(len(data))

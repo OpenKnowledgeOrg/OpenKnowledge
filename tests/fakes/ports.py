@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 from pydantic import SecretStr
 
 from openknowledge_contracts.datasets import DatasetSummary, ReleaseId, ReleaseMetadata, ShardRef
@@ -64,6 +66,13 @@ def gz(payload: bytes) -> bytes:
     return gzip.compress(payload, mtime=0)
 
 
+def parquet(rows: int, row_group_size: int | None = None) -> bytes:
+    sink = pa.BufferOutputStream()
+    table = pa.table({"id": [f"https://openalex.org/W{i}" for i in range(1, rows + 1)]})  # pyright: ignore[reportUnknownMemberType]
+    pq.write_table(table, sink, row_group_size=row_group_size)  # pyright: ignore[reportUnknownMemberType]
+    return sink.getvalue().to_pybytes()
+
+
 PAPERS = {"part-0.gz": gz(b'{"id": 1}\n'), "part-1.gz": gz(b'{"id": 2}\n' * 50)}
 COMMAND = DownloadDataset(release=RELEASE, dataset="papers", bucket="raw", prefix="s2")
 NEXT = "2026-10-13"
@@ -115,6 +124,8 @@ class FakeSource:
         self.unavailable: list[str] = []
         self.cut: set[str] = set()
         self.declared: dict[str, int | None] = {}
+        self.records: dict[str, int] = {}
+        self.sizes: dict[str, int] = {}
         self.reorder = False
         self.diffs: dict[str, list[tuple[str, str, list[str], list[str]]]] = {}
         self.diff_files: dict[str, bytes] = {}
@@ -160,6 +171,8 @@ class FakeSource:
                     f"https://files.test{shard_ref(dataset, name).source_path}"
                     f"?AWSAccessKeyId=AKIAFAKE&Signature=secret{self.listings}"
                 ),
+                size=self.sizes.get(name),
+                records=self.records.get(name),
             )
             for name in names
         )
@@ -332,8 +345,9 @@ class FakeStore:
 class FakeTables:
     """ClickHouse as the loader sees it, counting rows per object."""
 
-    def __init__(self, store: FakeStore) -> None:
+    def __init__(self, store: FakeStore, archive: dict[str, str] | None = None) -> None:
         self.store = store
+        self.archive = archive or {}
         self.uuid = UUID(int=1)
         self.updates: UpdateMode = "diffs"
         self.rows: dict[str, int] = {}
@@ -347,10 +361,13 @@ class FakeTables:
         self.scanned: list[str] = []
         self.flagged = 0
         self.marked: list[str] = []
+        self.keys: set[str] = set()
 
     async def table(self, dataset: str) -> TableState:
         return TableState(
             name=dataset,
+            dataset=dataset,
+            archive=self.archive.get(dataset, dataset),
             uuid=self.uuid,
             has_rows=bool(self.rows),
             load_sql_sha256="0" * 64,
@@ -359,9 +376,11 @@ class FakeTables:
         )
 
     async def loaded(self, dataset: str, source_object: ObjectPath) -> LoadRecord | None:
+        self.keys.add(dataset)
         return self.records.get(str(source_object))
 
     async def load(self, request: LoadObject) -> int:
+        self.keys.add(request.dataset)
         path = request.object_ref.path
         self.loads.append(path.name.rsplit("/", 1)[-1])
         self.operations.append(request.operation)
@@ -375,9 +394,11 @@ class FakeTables:
         self.records[record.source_object] = record
 
     async def live_rows(self, dataset: str, release: str) -> int:
+        self.keys.add(dataset)
         return sum(self.rows.values()) - self.collapsed
 
     async def duplicates(self, dataset: str, objects: Sequence[ObjectPath]) -> Duplicates:
+        self.keys.add(dataset)
         self.scanned = [path.name.rsplit("/", 1)[-1] for path in objects]
         return self.found
 

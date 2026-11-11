@@ -1838,6 +1838,7 @@ version = "0.1.0"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "openknowledge-contracts" },
+    { name = "pyarrow" },
     { name = "pydantic" },
 ]
 
@@ -1850,6 +1851,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "openknowledge-contracts", editable = "packages/contracts" },
+    { name = "pyarrow", specifier = ">=26,<27" },
     { name = "pydantic", specifier = ">=2.11,<3" },
 ]
 

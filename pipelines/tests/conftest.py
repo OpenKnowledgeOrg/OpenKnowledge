@@ -17,6 +17,7 @@ from prefect.settings import (
     temporary_settings,
 )
 
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import DownloadDatasetService
 from openknowledge_pipelines import admission, bootstrap
 from openknowledge_pipelines.settings import PipelineSettings
@@ -65,7 +66,12 @@ def store() -> FakeStore:
 @pytest.fixture
 def service(source: FakeSource, store: FakeStore) -> DownloadDatasetService:
     return DownloadDatasetService(
-        catalog=source, downloads=source, store=store, producer=PRODUCER, clock=clock
+        catalog=source,
+        downloads=source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+        source=SOURCES["semantic-scholar"],
     )
 
 

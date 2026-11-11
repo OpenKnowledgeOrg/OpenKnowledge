@@ -3,7 +3,7 @@ name = "openknowledge-core"
 version = "0.1.0"
 description = "OpenKnowledge use cases and the ports they need, free of frameworks and clients."
 requires-python = ">=3.12"
-dependencies = ["openknowledge-contracts", "pydantic>=2.11,<3"]
+dependencies = ["openknowledge-contracts", "pyarrow>=26,<27", "pydantic>=2.11,<3"]
 
 [dependency-groups]
 dev = ["pytest>=9,<10", "pytest-asyncio>=1.4,<2"]

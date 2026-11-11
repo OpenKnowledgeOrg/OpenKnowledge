@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,6 +18,7 @@ from openknowledge_contracts.manifests import (
     ShardReceipt,
 )
 
+FIXTURES = Path(__file__).parent / "fixtures" / "s2"
 NOW = datetime(2026, 10, 10, tzinfo=UTC)
 PATH = ObjectPath(bucket="raw", name="semantic-scholar/2026-10-06/papers/part-0.gz")
 PRODUCER = Producer(
@@ -129,3 +131,18 @@ def test_producer_image_digest_format() -> None:
         Producer(
             transform="verbatim", transform_version=1, software_version="1", image_digest="latest"
         )
+
+
+def test_an_s2_receipt_from_main_still_validates_byte_for_byte() -> None:
+    data = (FIXTURES / "receipt.json").read_bytes()
+    assert ShardReceipt.from_json(data).to_json() == data
+
+
+def test_only_a_non_s2_receipt_may_name_no_gzip_member() -> None:
+    s2 = json.loads((FIXTURES / "receipt.json").read_bytes())
+    with pytest.raises(ValidationError, match="gzip member"):
+        ShardReceipt.model_validate({**s2, "gzip_members": 0})
+    receipt = ShardReceipt.model_validate(
+        {**s2, "source": "openalex", "gzip_members": 0, "schema_ref": "openalex/works@2026-10-14"}
+    )
+    assert receipt.gzip_members == 0

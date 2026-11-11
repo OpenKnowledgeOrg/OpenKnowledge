@@ -1,5 +1,6 @@
 import pytest
 
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import DownloadDatasetService
 from tests.fakes.ports import PRODUCER, FakeSource, FakeStore, clock
 
@@ -17,5 +18,10 @@ def store() -> FakeStore:
 @pytest.fixture
 def service(source: FakeSource, store: FakeStore) -> DownloadDatasetService:
     return DownloadDatasetService(
-        catalog=source, downloads=source, store=store, producer=PRODUCER, clock=clock
+        catalog=source,
+        downloads=source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+        source=SOURCES["semantic-scholar"],
     )

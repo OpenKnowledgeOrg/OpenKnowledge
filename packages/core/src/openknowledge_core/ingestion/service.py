@@ -23,13 +23,13 @@ from openknowledge_contracts.datasets import (
 )
 from openknowledge_contracts.manifests import (
     SCHEMA_VERSION,
-    SOURCE,
     DatasetManifest,
     ManifestEntry,
     ObjectPath,
     Producer,
     ShardReceipt,
 )
+from openknowledge_contracts.sources import ArchivedDataset, Source
 from openknowledge_core.ingestion.commands import (
     DownloadDataset,
     DownloadDatasetResult,
@@ -41,19 +41,26 @@ from openknowledge_core.ingestion.commands import (
 )
 from openknowledge_core.ingestion.errors import (
     ArchiveConflict,
+    DatasetNotArchived,
     GzipInvalid,
     IncompleteTransfer,
     IntegrityError,
     InventoryChanged,
     LinkExpired,
     ManifestIncomplete,
+    ParquetInvalid,
     ReceiptInvalid,
     ShardNotListed,
     SourceRejected,
     StoredCopyMismatch,
     StoreUnavailable,
 )
-from openknowledge_core.ingestion.integrity import IntegrityReport, StreamCheck
+from openknowledge_core.ingestion.integrity import (
+    IntegrityReport,
+    ObjectCheck,
+    ParquetCheck,
+    StreamCheck,
+)
 from openknowledge_core.ingestion.models import (
     ByteStream,
     CheckedStream,
@@ -73,6 +80,7 @@ log = logging.getLogger(__name__)
 
 JSON = "application/json"
 GZIP = "application/gzip"
+PARQUET = "application/vnd.apache.parquet"
 RECEIPT_LIMIT = 64 * 1024
 DOCUMENT_LIMIT = 16 * 1024 * 1024
 AGAIN = "rerun later, and report it to Semantic Scholar if it repeats"
@@ -88,12 +96,14 @@ class DownloadDatasetService:
         store: ArtifactStore,
         producer: Producer,
         clock: Callable[[], datetime],
+        source: Source,
     ) -> None:
         self._catalog = catalog
         self._downloads = downloads
         self._store = store
         self._producer = producer
         self._clock = clock
+        self._source = source
         self._links: dict[tuple[str | None, str, str], dict[str, ShardLink]] = {}
 
     @property
@@ -126,6 +136,7 @@ class DownloadDatasetService:
 
     async def pin_dataset(self, command: DownloadDataset) -> PinnedDataset:
         """A stored inventory wins over a fresh listing, which only has to name the same shards."""
+        self._dataset_spec(command.dataset)
         await self.pin_release(
             PinRelease(release=command.release, bucket=command.bucket, prefix=command.prefix)
         )
@@ -173,6 +184,7 @@ class DownloadDatasetService:
 
     async def pin_diff(self, command: DownloadDiff) -> PinnedDiff:
         """A stored diff.json wins over a fresh listing, which only has to name the same files."""
+        self._dataset_spec(command.dataset)
         await self.pin_release(
             PinRelease(release=command.release, bucket=command.bucket, prefix=command.prefix)
         )
@@ -222,6 +234,7 @@ class DownloadDatasetService:
         """Leave ``shard`` archived with a valid receipt: verified, recovered or downloaded."""
         if shard not in pinned.shards:
             raise ShardNotListed(f"{shard.file_name} is not in {pinned.inventory_path}")
+        self._dataset_spec(pinned.dataset)
         receipt = await self._store.stat(pinned.receipt_path(shard))
         if receipt is not None:
             await self._verify_receipt(pinned, shard, receipt)
@@ -347,22 +360,35 @@ class DownloadDatasetService:
     async def _download(self, pinned: PinnedDataset, shard: ShardRef) -> bool:
         """Stream the shard into a new object and receipt it, or return False if one appeared."""
         target = pinned.object_path(shard)
-        source = await self._open(pinned, shard)
+        source, link = await self._open(pinned, shard)
+        parquet = self._is_parquet(pinned)
         async with aclosing(source.chunks) as chunks:
             if source.expected_size is None:
                 raise IncompleteTransfer(
                     f"{shard.file_name}: the file host sent no length, so nothing was uploaded; "
                     "rerun later"
                 )
+            if link.size is not None and link.size != source.expected_size:
+                raise IncompleteTransfer(
+                    f"{shard.file_name}: the file host sent {source.expected_size} bytes where "
+                    f"the source lists {link.size}, so nothing was uploaded; rerun later"
+                )
+            if source.expected_size == 0 and parquet:
+                raise ParquetInvalid(
+                    f"{shard.file_name}: the file host says the shard is empty, which no Parquet "
+                    "file is, so nothing was uploaded; rerun later"
+                )
             if source.expected_size == 0:
                 raise GzipInvalid(
                     f"{shard.file_name}: the file host says the shard is empty, which no gzip "
                     "file is, so nothing was uploaded; rerun later"
                 )
-            check = StreamCheck()
+            check = ParquetCheck(link.records) if parquet else StreamCheck()
             body = _verified(chunks, check, source.expected_size)
             try:
-                stored = await self._store.create_from_stream(target, body, content_type=GZIP)
+                stored = await self._store.create_from_stream(
+                    target, body, content_type=PARQUET if parquet else GZIP
+                )
             except IntegrityError as exc:
                 raise type(exc)(
                     f"{shard.file_name}: {exc}; nothing was stored, so a rerun downloads it again"
@@ -377,13 +403,27 @@ class DownloadDatasetService:
         await self._write_receipt(pinned, shard, stored, check.report)
         return True
 
-    async def _open(self, pinned: PinnedDataset, shard: ShardRef) -> ByteStream:
+    def _dataset_spec(self, dataset: str) -> ArchivedDataset:
+        spec = self._source.datasets.get(dataset)
+        if spec is None:
+            raise DatasetNotArchived(
+                f"{self._source.name} does not archive {dataset!r}; "
+                "add it to the source registry first"
+            )
+        return spec
+
+    def _is_parquet(self, pinned: PinnedDataset) -> bool:
+        return self._dataset_spec(pinned.dataset).format == "parquet"
+
+    async def _open(self, pinned: PinnedDataset, shard: ShardRef) -> tuple[ByteStream, ShardLink]:
         try:
-            return await self._downloads.open(await self._link(pinned, shard, refresh=False))
+            link = await self._link(pinned, shard, refresh=False)
+            return await self._downloads.open(link), link
         except LinkExpired:
             log.info("%s: the link expired, fetching a fresh listing", shard.file_name)
         try:
-            return await self._downloads.open(await self._link(pinned, shard, refresh=True))
+            link = await self._link(pinned, shard, refresh=True)
+            return await self._downloads.open(link), link
         except LinkExpired as exc:
             message = f"{shard.file_name}: a freshly listed link was refused too ({exc})"
         raise LinkExpired(f"{message}; {AGAIN}")
@@ -429,7 +469,8 @@ class DownloadDatasetService:
         """Receipt a stored object only if its length still matches what the source declares."""
         path = existing.ref.path
         log.info("%s: %s has no receipt, checking the stored copy", shard.file_name, path)
-        declared = await self._open(pinned, shard)
+        declared, link = await self._open(pinned, shard)
+        parquet = self._is_parquet(pinned)
         async with aclosing(declared.chunks):
             pass  # only the declared length is needed, not the body
         if declared.expected_size is None:
@@ -443,15 +484,20 @@ class DownloadDatasetService:
                 f"{path} holds {existing.size} bytes, but the source declares "
                 f"{declared.expected_size}; {_delete_hint(path)}"
             )
+        if link.size is not None and link.size != existing.size:
+            raise StoredCopyMismatch(
+                f"{path} holds {existing.size} bytes, but the source lists {link.size}; "
+                f"{_delete_hint(path)}"
+            )
         source = await self._store.open_read(existing.ref)
-        check = StreamCheck()
+        check = ParquetCheck(link.records) if parquet else StreamCheck()
         try:
             async with aclosing(source.chunks) as chunks:
                 async for chunk in chunks:
                     check.update(chunk)
             report = check.finish(existing.size)
         except IntegrityError as exc:
-            raise type(exc)(
+            raise (StoredCopyMismatch if parquet else type(exc))(
                 f"the stored copy {path} fails its check ({exc}); {_delete_hint(path)}"
             ) from None
         await self._write_receipt(pinned, shard, existing, report)
@@ -472,7 +518,7 @@ class DownloadDatasetService:
             )
         receipt = ShardReceipt(
             schema_version=SCHEMA_VERSION,
-            source=SOURCE,
+            source=self._source.name,
             release_id=pinned.release_id,
             dataset=pinned.dataset,
             shard=shard,
@@ -481,7 +527,7 @@ class DownloadDatasetService:
             sha256=report.sha256,
             md5=report.md5,
             crc32c=stored.crc32c,
-            schema_ref=_schema_ref(pinned),
+            schema_ref=_schema_ref(self._source, pinned),
             gzip_members=report.gzip_members,
             records=report.records,
             uncompressed_size=report.uncompressed_size,
@@ -513,13 +559,15 @@ class DownloadDatasetService:
             ) from None
         target = pinned.object_path(shard)
         expected: dict[str, object] = {
+            "source": self._source.name,
             "release": pinned.release_id,
             "dataset": pinned.dataset,
             "shard": shard,
             "object": target,
-            "schema": _schema_ref(pinned),
+            "schema": _schema_ref(self._source, pinned),
         }
         named: dict[str, object] = {
+            "source": receipt.source,
             "release": receipt.release_id,
             "dataset": receipt.dataset,
             "shard": receipt.shard,
@@ -614,7 +662,7 @@ async def read_small(store: ArtifactStore, stored: StoredObject, limit: int) -> 
     return bytes(data)
 
 
-def _verified(chunks: AsyncIterator[bytes], check: StreamCheck, size: int) -> CheckedStream:
+def _verified(chunks: AsyncIterator[bytes], check: ObjectCheck, size: int) -> CheckedStream:
     async def checked() -> AsyncGenerator[bytes, None]:
         async for chunk in chunks:
             check.update(chunk)
@@ -639,8 +687,8 @@ def _identities(shards: Iterable[ShardRef]) -> frozenset[tuple[str, str]]:
     return frozenset((shard.source_path, shard.file_name) for shard in shards)
 
 
-def _schema_ref(pinned: PinnedDataset) -> str:
-    ref = f"{SOURCE}/{pinned.dataset}@{pinned.release_id}"
+def _schema_ref(source: Source, pinned: PinnedDataset) -> str:
+    ref = f"{source.name}/{pinned.dataset}@{pinned.release_id}"
     return f"{ref}/deletes" if pinned.part == "deletes" else ref
 
 

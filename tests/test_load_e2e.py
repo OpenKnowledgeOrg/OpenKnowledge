@@ -29,6 +29,7 @@ from prefect.settings import (
 from prefect.utilities.asyncutils import run_coro_as_sync
 
 from openknowledge_adapters import gcs
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
     DownloadDataset,
     DownloadDatasetService,
@@ -170,7 +171,12 @@ def archiving(
         async with gcs.connect(config) as store:
             await work(
                 DownloadDatasetService(
-                    catalog=source, downloads=source, store=store, producer=PRODUCER, clock=clock
+                    catalog=source,
+                    downloads=source,
+                    store=store,
+                    producer=PRODUCER,
+                    clock=clock,
+                    source=SOURCES["semantic-scholar"],
                 )
             )
 

@@ -66,6 +66,8 @@ class ShardLink(BaseModel):
 
     shard: ShardRef
     url: SecretStr
+    size: NonNegativeInt | None = None
+    records: NonNegativeInt | None = None
 
 
 class DatasetListing(BaseModel):
@@ -235,6 +237,8 @@ class TableState(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
+    dataset: DatasetName
+    archive: DatasetName
     uuid: UUID
     has_rows: bool
     load_sql_sha256: Sha256Hex

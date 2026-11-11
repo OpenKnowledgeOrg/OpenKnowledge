@@ -17,10 +17,10 @@ from openknowledge_adapters.clickhouse.load_sql import (
 )
 from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.manifests import ObjectPath
+from openknowledge_contracts.sources import contract_for
 from openknowledge_contracts.tables import DatasetContract
 from openknowledge_contracts.tables.clickhouse import version_expression
 from openknowledge_contracts.tables.contract import REMOVED
-from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion.errors import TableRejected
 from openknowledge_core.ingestion.models import (
     AppliedRelease,
@@ -63,6 +63,8 @@ class ClickHouseTables:
                 )
         return TableState(
             name=contract.table,
+            dataset=contract.name,
+            archive=contract.archived,
             uuid=rows[0]["uuid"],
             has_rows=bool(rows[0]["total_rows"]),
             load_sql_sha256=sql_sha256(upsert_query(contract)),
@@ -170,6 +172,6 @@ class ClickHouseAppliedReleases:
 
 def _contract(dataset: DatasetName) -> DatasetContract:
     try:
-        return CONTRACTS[dataset]
+        return contract_for(dataset)[1]
     except KeyError:
         raise TableRejected(f"no table contract for dataset {dataset}") from None

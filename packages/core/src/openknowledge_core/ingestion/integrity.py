@@ -7,12 +7,21 @@ import hashlib
 import zlib
 from collections.abc import Iterator
 
-from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pydantic import BaseModel, ConfigDict, NonNegativeInt
 
 from openknowledge_contracts.manifests import Md5Base64, Sha256Hex
-from openknowledge_core.ingestion.errors import GzipInvalid, IncompleteTransfer
+from openknowledge_core.ingestion.errors import (
+    GzipInvalid,
+    IncompleteTransfer,
+    ParquetInvalid,
+    RowCountMismatch,
+)
 
 MAX_OUTPUT_STEP = 8 * 1024 * 1024
+MAX_FOOTER = 16 * 1024 * 1024
+MAGIC = b"PAR1"
 
 
 class IntegrityReport(BaseModel):
@@ -21,7 +30,7 @@ class IntegrityReport(BaseModel):
     size: NonNegativeInt
     sha256: Sha256Hex
     md5: Md5Base64
-    gzip_members: PositiveInt
+    gzip_members: NonNegativeInt
     records: NonNegativeInt
     uncompressed_size: NonNegativeInt
 
@@ -110,3 +119,68 @@ class StreamCheck:
             uncompressed_size=self._gzip.uncompressed_size,
         )
         return self.report
+
+
+class ParquetCheck:
+    """Digests a Parquet object verbatim and counts its rows from the footer alone.
+
+    Only the first four bytes and a bounded tail are kept, however large the object is.
+    """
+
+    def __init__(self, expected_records: int | None = None) -> None:
+        self._expected = expected_records
+        self._sha256 = hashlib.sha256()
+        self._md5 = hashlib.md5(usedforsecurity=False)
+        self._size = 0
+        self._head = b""
+        self._tail = bytearray()
+        self.report: IntegrityReport | None = None
+
+    def update(self, data: bytes) -> None:
+        if not data:
+            return
+        self._sha256.update(data)
+        self._md5.update(data)
+        self._size += len(data)
+        if len(self._head) < len(MAGIC):
+            self._head += data[: len(MAGIC) - len(self._head)]
+        self._tail += data[-(MAX_FOOTER + 8) :]
+        del self._tail[: -(MAX_FOOTER + 8)]
+
+    def finish(self, expected_size: int) -> IntegrityReport:
+        if self._size != expected_size:
+            raise IncompleteTransfer(f"received {self._size} bytes where {expected_size} were due")
+        rows = self._footer_rows()
+        if self._expected is not None and rows != self._expected:
+            raise RowCountMismatch(
+                f"the Parquet footer counts {rows} rows, but the source states {self._expected}"
+            )
+        self.report = IntegrityReport(
+            size=self._size,
+            sha256=self._sha256.hexdigest(),
+            md5=base64.b64encode(self._md5.digest()).decode(),
+            gzip_members=0,
+            records=rows,
+            uncompressed_size=self._size,
+        )
+        return self.report
+
+    def _footer_rows(self) -> int:
+        tail = bytes(self._tail)
+        if self._size < 12 or self._head != MAGIC or tail[-4:] != MAGIC:
+            raise ParquetInvalid("the object lacks the PAR1 magic at its start or end")
+        length = int.from_bytes(tail[-8:-4], "little")
+        if length > MAX_FOOTER:
+            raise ParquetInvalid(f"the Parquet footer claims {length} bytes, over {MAX_FOOTER}")
+        if length + 12 > self._size:
+            raise ParquetInvalid(f"the Parquet footer claims {length} bytes, more than the object")
+        footer = tail[-8 - length : -8]
+        try:
+            reader = pa.BufferReader(MAGIC + footer + tail[-8:-4] + MAGIC)
+            metadata = pq.read_metadata(reader)  # pyright: ignore[reportUnknownMemberType]
+        except (pa.ArrowException, OSError) as exc:
+            raise ParquetInvalid(f"the Parquet footer does not parse: {exc}") from None
+        return metadata.num_rows
+
+
+type ObjectCheck = StreamCheck | ParquetCheck
