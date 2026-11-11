@@ -110,14 +110,6 @@ def contract_for(name: DatasetName) -> tuple[Source, DatasetContract]:
     raise KeyError(name)
 
 
-def archive_folders(name: DatasetName) -> int:
-    """Source-path folders kept in the archive names of a dataset; 0 where none is registered."""
-    for source in SOURCES.values():
-        if name in source.datasets:
-            return source.datasets[name].folders
-    return 0
-
-
 def all_contracts() -> tuple[DatasetContract, ...]:
     """Every contract of every source."""
     return tuple(contract for source in SOURCES.values() for contract in source.contracts.values())

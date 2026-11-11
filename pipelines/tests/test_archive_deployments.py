@@ -150,6 +150,7 @@ async def test_managed_manual_diff_retries_only_anchored_completions(
     source: FakeSource,
     store: FakeStore,
 ) -> None:
+    from openknowledge_contracts.sources import SOURCES
     from openknowledge_core.ingestion.archive_progress import (
         ArchiveCompletion,
         ArchiveProgress,
@@ -159,7 +160,7 @@ async def test_managed_manual_diff_retries_only_anchored_completions(
     from openknowledge_core.ingestion.errors import IngestionError
     from tests.fakes.ports import NEXT, PAPERS, PRODUCER, clock
 
-    progress = ArchiveProgress(store, service, PRODUCER, clock)
+    progress = ArchiveProgress(store, service, PRODUCER, clock, SOURCES["semantic-scholar"])
     base = COMMAND.model_copy(update={"dataset": "s2orc_v2"})
     diff = DIFF.model_copy(update={"dataset": base.dataset})
     source.add(base.dataset, "part.gz", PAPERS["part-0.gz"])
