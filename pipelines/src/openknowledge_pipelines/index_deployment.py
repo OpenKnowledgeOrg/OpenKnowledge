@@ -33,7 +33,12 @@ def index_deployment() -> RunnerDeployment:
                 expect={"prefect.flow-run.Completed", "prefect.flow-run.Failed"},
                 match_related={
                     "prefect.resource.role": "flow",
-                    "prefect.resource.name": ["s2-load", "s2-load-diff", "s2-sync"],
+                    "prefect.resource.name": [
+                        "s2-load",
+                        "s2-load-diff",
+                        "s2-sync",
+                        "openalex-load",
+                    ],
                 },
             )
         ],

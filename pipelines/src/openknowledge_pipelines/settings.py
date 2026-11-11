@@ -135,3 +135,5 @@ class SyncSettings(BatchSettings, LoadSettings):  # pyright: ignore[reportIncomp
 
 class ScheduleSettings(CommonSettings):
     sync_schedule_enabled: bool = False
+    openalex_check_schedule_enabled: bool = False
+    """Each check downloads about 800 GB and reindexes every paper when a release is new."""

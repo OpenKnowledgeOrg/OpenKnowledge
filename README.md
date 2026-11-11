@@ -191,6 +191,12 @@ OpenAlex work, with `source` saying which. It takes the papers and abstracts dif
 earlier of their two releases; until abstracts holds a release, the group is skipped.
 Migration 00026 makes `openalex_works.is_retracted` nullable: OpenAlex leaves it empty for some works,
 and the load keeps that as NULL instead of refusing the file.
+The `openalex-load` deployment builds the read tables right after its load, and the search index
+follows each of its runs; a failed build leaves the load applied for the next sync to build from.
+`openalex-release-check` (Mondays 04:00 Europe/Zurich) archives and loads OpenAlex's release when
+its works are not archived yet, queueing behind a running S2 sync. Its schedule stays off until
+`OKP_OPENALEX_CHECK_SCHEDULE_ENABLED=true`: each new release downloads about 800 GB and
+reindexes every paper.
 
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.

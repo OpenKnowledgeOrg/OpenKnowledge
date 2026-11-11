@@ -159,7 +159,7 @@ def test_index_deployment_queues_and_triggers_from_loads() -> None:
     assert trigger.expect == {"prefect.flow-run.Completed", "prefect.flow-run.Failed"}
     assert trigger.model_dump()["match_related"] == {
         "prefect.resource.role": "flow",
-        "prefect.resource.name": ["s2-load", "s2-load-diff", "s2-sync"],
+        "prefect.resource.name": ["s2-load", "s2-load-diff", "s2-sync", "openalex-load"],
     }
 
 
