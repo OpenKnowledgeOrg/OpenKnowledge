@@ -13,18 +13,22 @@ from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, 
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_contracts.manifests import Producer
 from openknowledge_core.ingestion.errors import TableAccessDenied, TableRejected
-from openknowledge_core.ingestion.models import AppliedRelease, held_release
+from openknowledge_core.ingestion.models import AppliedRelease, TableState, held_release
 from openknowledge_core.ingestion.read_tables import (
     GROUP_SOURCES,
     GROUPS,
+    QUARTERLY,
     READ_TABLES,
+    REBUILT_TOGETHER,
     SOURCE_OF,
     BuildReadTablesResult,
     GroupPlan,
     GroupState,
     ReadTableResult,
     ReadTablesPath,
+    group_release,
     plan_group,
+    quarterly_marker,
 )
 
 PAPERS, OUT, IN, XWALK = READ_TABLES
@@ -89,6 +93,12 @@ BYTES_PER_KEY = {
     "citations": BYTES_PER_CITATION,
     "openalex": BYTES_PER_XWALK,
 }
+SHARE_OF = {"openalex": PAPERS}
+"""The table a group's touched keys are measured against, one row per key, when its own tables
+are not: ``paper_xwalk`` is empty until OpenAlex is loaded."""
+S2_SOURCES = ("papers", "citations")
+OPENALEX = {"openalex_works": "works", "openalex_abstracts": "works-abstracts"}
+"""The OpenAlex tables by the dataset that loads them."""
 KEPT_DELTA: frozenset[str] = frozenset({"openalex"})
 """Groups whose delta survives a failed run: it holds keys the deletes made unrecoverable,
 the other papers that shared a work with a delta key."""
@@ -203,6 +213,10 @@ class ClickHouseReadTables:
                 or live.get(table) != applied.target_uuid
             ):
                 return False
+        openalex = await self._openalex()
+        for group, source in QUARTERLY.items():
+            if not await self._quarterly_current(group, live, held_release(*openalex[source])):
+                return False
         return True
 
     async def reclaim(self) -> None:
@@ -216,15 +230,16 @@ class ClickHouseReadTables:
         # marker answer. Stop the old insert first; never drop the published names.
         for table in TABLES:
             await self._client.post(f"DROP TABLE IF EXISTS {table}_new SYNC")
-        for table in DELTA.values():
-            await self._client.post(f"DROP TABLE IF EXISTS {table}")
+        for group, table in DELTA.items():
+            if group not in KEPT_DELTA:
+                await self._client.post(f"DROP TABLE IF EXISTS {table}")
 
     async def build(
         self, producer: Producer, clock: Callable[[], datetime], *, full: bool = False
     ) -> BuildReadTablesResult:
         releases: dict[str, ReleaseId] = {}
         uuids: dict[str, UUID] = {}
-        for name in GROUPS:
+        for name in S2_SOURCES:
             source = await self._tables.table(name)
             release = held_release(source, await self._applied.latest(name))
             if release is None:
@@ -233,20 +248,50 @@ class ClickHouseReadTables:
                     "finish its load before building read tables"
                 )
             releases[name], uuids[name] = release, source.uuid
-        if full:
-            return await self._full(producer, clock, releases)
-        async with self._stage("read tables: recovery and plan"):
-            await self.reclaim()
-            live = await self._live()
-            plans: dict[str, GroupPlan] = {}
-            for name in GROUPS:
-                state = await self._state(name, releases[name], uuids[name], live)
-                plans[name] = plan_group(state, full=False)
-        if any(plan.path is ReadTablesPath.FULL for plan in plans.values()):
-            return await self._full(producer, clock, releases)
+        openalex = await self._openalex()
+        held = {table: held_release(*found) for table, found in openalex.items()}
+        if (release := held["openalex_works"]) is not None:
+            releases["openalex_works"] = release
+        groups = [name for name in GROUPS if name != "openalex" or await self._settled(openalex)]
+        plans: dict[str, GroupPlan] = {}
+        if not full:
+            async with self._stage("read tables: recovery and plan"):
+                await self.reclaim()
+                live = await self._live()
+                for name in groups:
+                    state = await self._state(name, releases, uuids, live, held)
+                    plans[name] = plan_group(state, full=False)
+        result = BuildReadTablesResult(source_releases=releases, tables={})
+        for unit in REBUILT_TOGETHER:
+            built = await self._unit(
+                tuple(name for name in unit if name in groups), plans, releases, producer, clock
+            )
+            result = result.model_copy(
+                update={
+                    "tables": result.tables | built.tables,
+                    "paths": result.paths | built.paths,
+                    "touched": result.touched | built.touched,
+                }
+            )
+        return result
+
+    async def _unit(
+        self,
+        groups: tuple[str, ...],
+        plans: Mapping[str, GroupPlan],
+        releases: Mapping[str, ReleaseId],
+        producer: Producer,
+        clock: Callable[[], datetime],
+    ) -> BuildReadTablesResult:
+        """Bring groups that are rebuilt together current; ``plans`` is empty for a full build."""
+        if not groups:
+            return BuildReadTablesResult(source_releases=dict(releases), tables={})
+        if any(name not in plans or plans[name].path is ReadTablesPath.FULL for name in groups):
+            return await self._full(producer, clock, releases, groups=groups)
         results: dict[str, ReadTableResult] = {}
         touched: dict[str, int] = {}
-        for name, plan in plans.items():
+        for name in groups:
+            plan = plans[name]
             if plan.path is ReadTablesPath.IN_ONLY or plan.in_only_first:
                 results[IN] = await self._in_only(plan.start or plan.end, producer, clock)
             if plan.path is ReadTablesPath.INCREMENTAL and plan.start is not None:
@@ -254,19 +299,63 @@ class ClickHouseReadTables:
                     name, plan.start, plan.end, producer, clock
                 )
                 if tables is None:
-                    return await self._full(producer, clock, releases, touched)
+                    return await self._full(producer, clock, releases, touched, groups=groups)
                 results |= tables
         return BuildReadTablesResult(
-            source_releases=releases,
+            source_releases=dict(releases),
             tables=results,
-            paths={name: plan.path for name, plan in plans.items()},
+            paths={name: plans[name].path for name in groups},
             touched=touched,
         )
 
+    async def _openalex(self) -> dict[str, tuple[TableState, AppliedRelease | None]]:
+        found: dict[str, tuple[TableState, AppliedRelease | None]] = {}
+        for table, dataset in OPENALEX.items():
+            found[table] = (await self._tables.table(dataset), await self._applied.latest(table))
+        return found
+
+    async def _settled(
+        self, openalex: Mapping[str, tuple[TableState, AppliedRelease | None]]
+    ) -> bool:
+        """Whether both OpenAlex tables show just their one applied release.
+
+        A failed or running load leaves newer rows that FINAL already shows, so the group keeps
+        its last build until the load completes.
+        """
+        held = {table: held_release(*found) for table, found in openalex.items()}
+        if len(set(held.values())) > 1:
+            log.warning("the OpenAlex tables hold different releases %s; skipping openalex", held)
+            return False
+        for table, (state, _) in openalex.items():
+            release = held[table]
+            if release is None:
+                pending = state.has_rows
+            else:
+                rows = await self._client.rows(
+                    f"SELECT count() AS rows FROM {table} WHERE source_release > {{release:Date}}",
+                    release=release,
+                )
+                pending = int(rows[0]["rows"]) > 0
+            if pending:
+                log.warning(
+                    "%s holds rows past its applied release %s, from a load that has not "
+                    "finished; skipping openalex",
+                    table,
+                    release,
+                )
+                return False
+        return True
+
     async def _state(
-        self, group: str, source: ReleaseId, source_uuid: UUID, live: Mapping[str, UUID]
+        self,
+        group: str,
+        releases: Mapping[str, ReleaseId],
+        uuids: Mapping[str, UUID],
+        live: Mapping[str, UUID],
+        held: Mapping[str, ReleaseId | None],
     ) -> GroupState:
         tables = GROUPS[group]
+        end = group_release(group, releases)
         markers = [await self._applied.latest(table) for table in tables]
         # A marker counts only for the live table it names, and the group's tables must agree.
         found = {
@@ -274,23 +363,52 @@ class ClickHouseReadTables:
             for table, applied in zip(tables, markers, strict=True)
         }
         marker = found.pop() if len(found) == 1 else None
-        took = marker is not None and await self._applied.took(group, source_uuid, marker)
-        rebased = (
-            marker is not None
-            and took
-            and await self._applied.rebased(group, source_uuid, marker, source)
-        )
+        took = rebased = False
+        if marker is not None:
+            took = all(
+                [
+                    await self._applied.took(source, uuids[source], marker)
+                    for source in GROUP_SOURCES[group]
+                ]
+            )
+        if took and marker is not None:
+            rebased = any(
+                [
+                    await self._applied.rebased(source, uuids[source], marker, end)
+                    for source in GROUP_SOURCES[group]
+                ]
+            )
         edges = took and OUT in tables
         if edges:
             await self._require_ids()
+        quarterly = group not in QUARTERLY or await self._quarterly_current(
+            group, live, held[QUARTERLY[group]]
+        )
         return GroupState(
             marker=marker,
-            source=source,
+            source=end,
             source_took_marker=took,
             source_rebased=rebased,
             ids_missing_out=edges and await self._missing_ids(OUT),
             ids_missing_in=edges and await self._missing_ids(IN),
+            quarterly_current=quarterly,
         )
+
+    async def _quarterly_current(
+        self, group: str, live: Mapping[str, UUID], held: ReleaseId | None
+    ) -> bool:
+        """Whether the live tables were built from the quarterly source's held release.
+
+        Without a held release, a table is current unless its live copy was built from one.
+        """
+        for table in GROUPS[group]:
+            applied = await self._applied.latest(quarterly_marker(table, QUARTERLY[group]))
+            built = applied is not None and applied.target_uuid == live.get(table)
+            if held is None and built:
+                return False
+            if held is not None and (not built or applied is None or applied.release != held):
+                return False
+        return True
 
     async def _missing_ids(self, table: str) -> bool:
         """Whether rows from before ``citationid`` remain, which an update cannot key on."""
@@ -336,7 +454,8 @@ class ClickHouseReadTables:
             for statement in delta_sql(source, start, end, self._max_delta_keys):
                 await self._run(statement)
             touched = (await self._counts(DELTA[source]))[DELTA[source]]
-            total = min((await self._counts(*tables)).values())
+            share = SHARE_OF.get(source)
+            total = min((await self._counts(*((share,) if share else tables))).values())
             if touched > self._max_delta_keys or touched > self._max_delta_share * total:
                 log.info(
                     "%s touched %d keys for %d read table rows, over the %d key cap or the "
@@ -383,12 +502,15 @@ class ClickHouseReadTables:
         clock: Callable[[], datetime],
         releases: Mapping[str, ReleaseId],
         touched: Mapping[str, int] | None = None,
+        *,
+        groups: tuple[str, ...],
     ) -> BuildReadTablesResult:
+        tables = tuple(table for group in groups for table in GROUPS[group])
         async with self._stage("read tables: preflight and recovery"):
             await self.reclaim()
-            live = await self._preflight()
+            live = await self._preflight(groups)
         results: dict[str, ReadTableResult] = {}
-        for table in TABLES:
+        for table in tables:
             started = monotonic()
             async with self._stage(f"read tables: build {table}"):
                 await self._client.post(f"CREATE TABLE {table}_new AS {table}")
@@ -399,10 +521,9 @@ class ClickHouseReadTables:
                 )
                 results[table] = ReadTableResult(rows=rows, seconds=monotonic() - started)
         async with self._stage("read tables: validate counts"):
-            built = results[OUT].rows
-            if results[IN].rows != built:
+            if "citations" in groups and results[IN].rows != results[OUT].rows:
                 raise TableRejected("citation edge counts differ; no read tables were swapped")
-            for table in TABLES:
+            for table in tables:
                 if results[table].rows < live[table] * MIN_KEPT:
                     raise TableRejected(
                         f"the rebuild holds {results[table].rows} rows where {table} has "
@@ -410,7 +531,7 @@ class ClickHouseReadTables:
                         "truncate the affected live table and rerun"
                     )
         # EXCHANGE is not atomic across tables, even in one statement. Undo a partial swap so a
-        # failure leaves the old generation live, and record nothing until all three are live.
+        # failure leaves the old generation live, and record nothing until all are live.
         # An uncommitted marker insert leaves the new generation live but not current, so the next
         # sync rebuilds it; one whose answer was lost may have committed, and then it is current
         # and the next sync only reclaims the old tables.
@@ -418,25 +539,41 @@ class ClickHouseReadTables:
         async with self._stage("read tables: publish"):
             swapped: list[str] = []
             try:
-                for table in TABLES:
+                for table in tables:
                     await self._client.post(f"EXCHANGE TABLES {table}_new AND {table}")
                     swapped.append(table)
             except BaseException:
                 for table in reversed(swapped):
                     await self._client.post(f"EXCHANGE TABLES {table}_new AND {table}")
                 raise
-            await self._applied.record_all(
-                [
-                    await self._marker(table, releases[SOURCE_OF[table]], None, producer, clock)
-                    for table in TABLES
-                ]
-            )
-            for table in TABLES:
+            markers = [
+                await self._marker(table, group_release(group, releases), None, producer, clock)
+                for group in groups
+                for table in GROUPS[group]
+            ]
+            # Which quarterly release built the group; none while that source holds no release.
+            markers += [
+                await self._marker(
+                    table,
+                    releases[QUARTERLY[group]],
+                    None,
+                    producer,
+                    clock,
+                    target=quarterly_marker(table, QUARTERLY[group]),
+                )
+                for group in groups
+                if QUARTERLY.get(group) in releases
+                for table in GROUPS[group]
+            ]
+            await self._applied.record_all(markers)
+            for table in tables:
                 await self._client.post(f"DROP TABLE {table}_new SYNC")
+            for group in KEPT_DELTA.intersection(groups):
+                await self._client.post(f"DROP TABLE IF EXISTS {DELTA[group]}")
         return BuildReadTablesResult(
             source_releases=dict(releases),
             tables=results,
-            paths=dict.fromkeys(GROUPS, ReadTablesPath.FULL),
+            paths=dict.fromkeys(groups, ReadTablesPath.FULL),
             touched=dict(touched or {}),
         )
 
@@ -459,9 +596,10 @@ class ClickHouseReadTables:
         from_release: ReleaseId | None,
         producer: Producer,
         clock: Callable[[], datetime],
+        target: str | None = None,
     ) -> AppliedRelease:
         return AppliedRelease(
-            target=table,
+            target=target or table,
             target_uuid=await self._uuid(table),
             release=release,
             from_release=from_release,
@@ -473,7 +611,7 @@ class ClickHouseReadTables:
     async def _live(self) -> dict[str, UUID]:
         rows = await self._client.rows(
             "SELECT name, uuid FROM system.tables WHERE database = currentDatabase() "
-            f"AND name IN ('{PAPERS}', '{OUT}', '{IN}')"
+            f"AND name IN ({', '.join(f"'{table}'" for table in TABLES)})"
         )
         return {row["name"]: UUID(row["uuid"]) for row in rows}
 
@@ -493,21 +631,29 @@ class ClickHouseReadTables:
             counts[table] = int(rows[0]["rows"])
         return counts
 
-    async def _preflight(self) -> dict[str, int]:
-        """Check the read tables and capacity; return live row counts."""
+    async def _preflight(self, groups: tuple[str, ...]) -> dict[str, int]:
+        """Check the read tables of ``groups`` and capacity; return their live row counts."""
+        tables = tuple(table for group in groups for table in GROUPS[group])
+        names = ", ".join(f"'{name}'" for name in ("papers", "citations", *tables))
         rows = await self._client.rows(
             "SELECT name, total_rows FROM system.tables WHERE database = currentDatabase() "
-            f"AND name IN ('papers', 'citations', '{PAPERS}', '{OUT}', '{IN}')"
+            f"AND name IN ({names})"
         )
         found = {row["name"]: int(row["total_rows"] or 0) for row in rows}
-        if not set(TABLES) <= found.keys():
+        if not set(tables) <= found.keys():
             raise TableRejected("the read tables do not exist; run the migrations")
-        await self._require_ids()
+        if "citations" in groups:
+            await self._require_ids()
+        per_row = {
+            "papers": ("papers", BYTES_PER_PAPER),
+            "citations": ("citations", BYTES_PER_CITATION),
+            "openalex": ("papers", BYTES_PER_XWALK),
+        }
         await self._require_free(
-            found["citations"] * BYTES_PER_CITATION + found["papers"] * BYTES_PER_PAPER,
+            sum(found[per_row[group][0]] * per_row[group][1] for group in groups),
             "building read tables",
         )
-        return await self._counts(*TABLES)
+        return await self._counts(*tables)
 
     async def _require_ids(self) -> None:
         columns = await self._client.rows(
