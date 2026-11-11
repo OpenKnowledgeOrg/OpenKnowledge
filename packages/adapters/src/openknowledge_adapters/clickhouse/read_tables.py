@@ -8,12 +8,14 @@ from uuid import UUID
 from pydantic import TypeAdapter
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
+from openknowledge_adapters.clickhouse.crosswalk import XWALK_COLUMNS, expansion_sql, xwalk_select
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_contracts.manifests import Producer
 from openknowledge_core.ingestion.errors import TableAccessDenied, TableRejected
 from openknowledge_core.ingestion.models import AppliedRelease, held_release
 from openknowledge_core.ingestion.read_tables import (
+    GROUP_SOURCES,
     GROUPS,
     READ_TABLES,
     SOURCE_OF,
@@ -25,7 +27,7 @@ from openknowledge_core.ingestion.read_tables import (
     plan_group,
 )
 
-PAPERS, OUT, IN = READ_TABLES
+PAPERS, OUT, IN, XWALK = READ_TABLES
 TABLES = READ_TABLES
 QUERY_ID = "citation-edges"  # Keep the recovery key stable across the rename.
 DELETE_QUERY_ID = "read-tables-delete"
@@ -33,6 +35,7 @@ COLUMNS = {
     PAPERS: "corpusid, title, year, venue, citationcount, influentialcitationcount, referencecount",
     OUT: "citing, cited, isinfluential, intents, citationid",
     IN: "citing, cited, isinfluential, intents, citationid",
+    XWALK: XWALK_COLUMNS,
 }
 EDGES_IN = f"SELECT {COLUMNS[IN]} FROM {OUT}"
 SOURCES = {
@@ -45,30 +48,50 @@ SOURCES = {
     "FROM citations FINAL WHERE citedcorpusid IS NOT NULL",
     # One scan of citations: the incoming table is the outgoing one, sorted the other way.
     IN: f"{EDGES_IN}_new",
+    XWALK: xwalk_select(None),
 }
 MEMORY = (
     "SETTINGS max_memory_usage = 8000000000, max_execution_time = 14400, max_insert_threads = 1"
 )
 SETTINGS = f"{MEMORY}, "
 EDGE_BLOCKS = "min_insert_block_size_rows = 50000000, min_insert_block_size_bytes = 0"
+SPILL = (
+    "join_algorithm = 'grace_hash', grace_hash_join_initial_buckets = 64, "
+    "max_bytes_before_external_sort = 4000000000, "
+    "max_bytes_before_external_group_by = 4000000000"
+)
 BLOCKS = {
     # Paper rows carry titles: 50M of them would not fit the memory limit, so cap blocks by bytes.
     PAPERS: "min_insert_block_size_rows = 0, min_insert_block_size_bytes = 1073741824",
     OUT: EDGE_BLOCKS,
     IN: EDGE_BLOCKS,
+    XWALK: f"{EDGE_BLOCKS}, {SPILL}",
 }
 BYTES_PER_CITATION = 28
 """(4 + 4 + 5.31 + 5.31) bytes for both new copies with IDs, with 50% merge room."""
 BYTES_PER_PAPER = 100
 """Provisional free disk per papers row, pending a measured build."""
+BYTES_PER_XWALK = 40
+"""Provisional free disk per papers row, pending a measured build."""
 BYTES_PER_IN_ONLY = 14
 """(4 + 5.31) bytes for one new incoming copy with IDs, with 50% merge room."""
 MIN_KEPT = 0.9
 """A rebuild below this share of any live table is refused."""
-DELTA = {"papers": "read_delta_papers", "citations": "read_delta_citations"}
-"""Scratch tables holding the keys a source took in since the read tables' release."""
-KEY = {"papers": "corpusid", "citations": "citationid"}
-BYTES_PER_KEY = {"papers": BYTES_PER_PAPER, "citations": BYTES_PER_CITATION}
+DELTA = {
+    "papers": "read_delta_papers",
+    "citations": "read_delta_citations",
+    "openalex": "read_delta_openalex",
+}
+"""Scratch tables holding the keys a group's sources took in since its release."""
+KEY = {"papers": "corpusid", "citations": "citationid", "openalex": "corpusid"}
+BYTES_PER_KEY = {
+    "papers": BYTES_PER_PAPER,
+    "citations": BYTES_PER_CITATION,
+    "openalex": BYTES_PER_XWALK,
+}
+KEPT_DELTA: frozenset[str] = frozenset({"openalex"})
+"""Groups whose delta survives a failed run: it holds keys the deletes made unrecoverable,
+the other papers that shared a work with a delta key."""
 BYTES_PER_SCRATCH_KEY = 16
 """An uncompressed UInt64 plus equal merge room; independent of the source row size."""
 DELTA_HEADROOM = 5 * 2**30
@@ -78,29 +101,46 @@ _RELEASE = TypeAdapter(ReleaseId)
 log = logging.getLogger(__name__)
 
 
-def delta_sql(source: str, start: ReleaseId, end: ReleaseId, max_keys: int) -> list[str]:
-    """Collect the keys ``source`` wrote in ``(start, end]``, tombstones and superseded rows too.
+def delta_sql(group: str, start: ReleaseId, end: ReleaseId, max_keys: int) -> list[str]:
+    """Collect the keys ``group``'s sources wrote in ``(start, end]``, deletions included.
 
-    It stops one key past ``max_keys``, so a delta over the cap never has to fit in memory.
+    It stops one key past ``max_keys``, so a delta over the cap never has to fit in memory. A
+    kept delta adds to the keys of a failed run of the same window, then adds the papers whose
+    choice of work shares a work with a delta key's old or new choice.
     """
     start, end = _RELEASE.validate_python(start), _RELEASE.validate_python(end)
+    delta = DELTA[group]
+    window = f"source_release > '{start}' AND source_release <= '{end}'"
+    if group not in KEPT_DELTA:
+        return [
+            f"DROP TABLE IF EXISTS {delta}",
+            f"CREATE TABLE {delta} (key UInt64) ENGINE = MergeTree ORDER BY key",
+            f"INSERT INTO {delta} SELECT DISTINCT {KEY[group]} FROM {group} "
+            f"WHERE {window} "
+            # One thread: each would hold its own set of up to max_keys keys.
+            f"LIMIT {max_keys + 1} {MEMORY}, max_threads = 1",
+        ]
+    sources = " UNION ALL ".join(
+        f"SELECT {KEY[group]} AS key FROM {source} WHERE {window}"
+        for source in GROUP_SOURCES[group]
+    )
     return [
-        f"DROP TABLE IF EXISTS {DELTA[source]}",
-        f"CREATE TABLE {DELTA[source]} (key UInt64) ENGINE = MergeTree ORDER BY key",
-        f"INSERT INTO {DELTA[source]} SELECT DISTINCT {KEY[source]} FROM {source} "
-        f"WHERE source_release > '{start}' AND source_release <= '{end}' "
-        # One thread: each would hold its own set of up to max_keys keys.
+        f"CREATE TABLE IF NOT EXISTS {delta} (key UInt64) ENGINE = MergeTree ORDER BY key",
+        f"INSERT INTO {delta} SELECT DISTINCT key FROM ({sources}) "
+        f"WHERE key NOT IN (SELECT key FROM {delta}) "
         f"LIMIT {max_keys + 1} {MEMORY}, max_threads = 1",
+        f"INSERT INTO {delta} {expansion_sql(delta)} {MEMORY}, {SPILL}",
     ]
 
 
-def apply_sql(source: str) -> list[str]:
-    """Replace the rows of the delta keys in ``source``'s read tables with their current rows.
+def apply_sql(group: str) -> list[str]:
+    """Replace the rows of the delta keys in ``group``'s read tables with their current rows.
 
     Deleting every delta key first makes a rerun after a partial run reach the same state.
     """
-    touched = f"{KEY[source]} IN (SELECT key FROM {DELTA[source]})"
-    tables = [table for table in TABLES if SOURCE_OF[table] == source]
+    keys = f"SELECT key FROM {DELTA[group]}"
+    touched = f"{KEY[group]} IN ({keys})"
+    tables = GROUPS[group]
     # Waited on: until a delete finishes, the old rows still show next to the new ones.
     deletes = [
         f"DELETE FROM {table} WHERE {touched} SETTINGS lightweight_deletes_sync = 2"
@@ -108,11 +148,15 @@ def apply_sql(source: str) -> list[str]:
     ]
     # The incoming edges come from the outgoing ones, which TABLES updates first.
     selects = {
-        table: f"{EDGES_IN} WHERE" if table == IN else f"{SOURCES[table]} AND" for table in tables
+        table: f"{EDGES_IN} WHERE {touched}"
+        if table == IN
+        else xwalk_select(keys)
+        if table == XWALK
+        else f"{SOURCES[table]} AND {touched}"
+        for table in tables
     }
     return deletes + [
-        f"INSERT INTO {table} ({COLUMNS[table]}) {selects[table]} {touched} "
-        f"{SETTINGS}{BLOCKS[table]}"
+        f"INSERT INTO {table} ({COLUMNS[table]}) {selects[table]} {SETTINGS}{BLOCKS[table]}"
         for table in tables
     ]
 

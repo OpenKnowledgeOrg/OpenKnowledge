@@ -21,7 +21,7 @@ from openknowledge_adapters.clickhouse.read_tables import (
     delta_sql,
     in_only_sql,
 )
-from openknowledge_core.ingestion.read_tables import READ_TABLES
+from openknowledge_core.ingestion.read_tables import GROUPS
 from tests.clickhouse_local import clickhouse_local, needs_clickhouse, up
 
 
@@ -56,11 +56,35 @@ def test_edge_rebuild_preserves_live_citation_ids(tmp_path: Path) -> None:
     ]
 
 
-def _full_build(suffix: str) -> str:
+S2_TABLES = GROUPS["papers"] + GROUPS["citations"]
+
+
+def _full_build(suffix: str, tables: tuple[str, ...] = S2_TABLES) -> str:
     return "".join(
         f"CREATE TABLE {table}{suffix} AS {table};\n"
         f"INSERT INTO {table}{suffix} ({COLUMNS[table]}) {SOURCES[table]};\n"
-        for table in READ_TABLES
+        for table in tables
+    )
+
+
+def _publish(tables: tuple[str, ...]) -> str:
+    return "".join(
+        f"EXCHANGE TABLES {table}_new AND {table}; DROP TABLE {table}_new;\n" for table in tables
+    )
+
+
+def _copies(sql: str, tmp_path: Path) -> dict[str, list[dict[str, Any]]]:
+    copies: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in clickhouse_local(sql, tmp_path):
+        copies[row.pop("copy")].append(row)
+    return copies
+
+
+def _compare(tables: tuple[str, ...]) -> str:
+    return "".join(
+        f"SELECT '{name}' AS copy, * FROM {name} ORDER BY all FORMAT JSONEachRow;\n"
+        for table in tables
+        for name in (table, f"{table}_new")
     )
 
 
@@ -74,15 +98,6 @@ def test_incremental_update_equals_full_rebuild(tmp_path: Path) -> None:
     ]
     # A run that stopped before its last insert, then two complete reruns.
     statements = ";\n".join([*run[:-1], *run, *run])
-    publish = "".join(
-        f"EXCHANGE TABLES {table}_new AND {table}; DROP TABLE {table}_new;\n"
-        for table in READ_TABLES
-    )
-    compare = "".join(
-        f"SELECT '{name}' AS copy, * FROM {name} ORDER BY all FORMAT JSONEachRow;\n"
-        for table in READ_TABLES
-        for name in (table, f"{table}_new")
-    )
     sql = f"""
         {up()}
         SYSTEM STOP MERGES citations;
@@ -97,7 +112,7 @@ def test_incremental_update_equals_full_rebuild(tmp_path: Path) -> None:
         VALUES (1, 'a', 2020, 1, '2026-10-01', 0), (2, 'b', 2021, 2, '2026-10-01', 0),
                (3, 'c', NULL, 3, '2026-10-01', 0), (4, 'd', 2023, 4, '2026-10-01', 0);
         {_full_build("_new")}
-        {publish}
+        {_publish(S2_TABLES)}
         INSERT INTO citations (citationid, citingcorpusid, citedcorpusid, isinfluential, intents,
             source_release, is_deleted)
         VALUES (11, 1, 9, 1, [['background']], '2026-10-02', 0),
@@ -113,12 +128,10 @@ def test_incremental_update_equals_full_rebuild(tmp_path: Path) -> None:
         VALUES (3, '2026-10-02', 1), (4, '2026-10-02', 1);
         {statements};
         {_full_build("_new")}
-        {compare}
+        {_compare(S2_TABLES)}
     """
-    copies: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in clickhouse_local(sql, tmp_path):
-        copies[row.pop("copy")].append(row)
-    for table in READ_TABLES:
+    copies = _copies(sql, tmp_path)
+    for table in S2_TABLES:
         assert copies[table] == copies[f"{table}_new"], table
     assert sorted(row["citationid"] for row in copies[IN]) == [11, 12, 14, 15, 16]
     assert [row["corpusid"] for row in copies[PAPERS]] == [1, 2, 4, 5]
@@ -219,4 +232,41 @@ def test_xwalk_full_build_ranks_every_candidate(tmp_path: Path) -> None:
         (11, 110, "doi", 3, False, False),
         (12, 120, "doi", 1, True, False),
         (12, 121, "doi", 2, False, False),
+    ]
+
+
+@needs_clickhouse
+def test_xwalk_incremental_equals_full_rebuild(tmp_path: Path) -> None:
+    run = [*delta_sql("openalex", "2026-10-01", "2026-10-03", 100), *apply_sql("openalex")]
+    # A run that stopped before its last insert, then two complete reruns on the kept delta.
+    statements = ";\n".join([*run[:-1], *run, *run])
+    xwalk = GROUPS["openalex"]
+    sql = f"""
+        {up()}
+        SYSTEM STOP MERGES papers;
+        INSERT INTO papers (corpusid, externalids, source_release, is_deleted)
+        VALUES (1, {{'DOI': '10.1/d10'}}, '2026-10-01', 0),
+               (2, {{'DOI': '10.1/d20'}}, '2026-10-01', 0),
+               (4, {{'DOI': '10.1/d40'}}, '2026-10-01', 0),
+               (5, {{'DOI': '10.1/d40'}}, '2026-10-01', 0);
+        INSERT INTO openalex_works (work_id, doi_norm, has_abstract, source_release, is_deleted)
+        VALUES (10, '10.1/d10', 1, '2026-10-01', 0), (20, '10.1/d20', 1, '2026-10-01', 0),
+               (30, '10.1/d30', 1, '2026-10-01', 0), (40, '10.1/d40', 1, '2026-10-01', 0);
+        {_full_build("_new", xwalk)}
+        {_publish(xwalk)}
+        INSERT INTO papers (corpusid, externalids, source_release, is_deleted)
+        VALUES (2, {{'DOI': '10.1/d10'}}, '2026-10-02', 0),
+               (3, {{'DOI': '10.1/d30'}}, '2026-10-03', 0);
+        INSERT INTO papers (corpusid, source_release, is_deleted) VALUES (4, '2026-10-02', 1);
+        {statements};
+        {_full_build("_new", xwalk)}
+        {_compare(xwalk)}
+    """
+    copies = _copies(sql, tmp_path)
+    assert copies["paper_xwalk"] == copies["paper_xwalk_new"]
+    assert [(r["corpusid"], r["work_id"], r["shared_work"]) for r in copies["paper_xwalk"]] == [
+        (1, 10, True),
+        (2, 10, True),
+        (3, 30, False),
+        (5, 40, False),
     ]
