@@ -364,3 +364,35 @@ def test_best_abstract_incremental_equals_full_rebuild(tmp_path: Path) -> None:
         (3, "openalex", "OA three", 30),
         (5, "openalex", "OA six", 60),
     ]
+
+
+@needs_clickhouse
+def test_apply_keeps_the_best_abstract_of_papers_that_only_shared_a_work(tmp_path: Path) -> None:
+    group = GROUPS["openalex"]
+    # Stop before the last insert, as a search pass reading in between would see it.
+    statements = ";\n".join(
+        [*delta_sql("openalex", "2026-10-01", "2026-10-02", 100), *apply_sql("openalex")][:-1]
+    )
+    sql = f"""
+        {up()}
+        INSERT INTO papers (corpusid, externalids, source_release, is_deleted)
+        VALUES (1, {{'DOI': '10.1/d10'}}, '2026-10-01', 0),
+               (2, {{'DOI': '10.1/d10'}}, '2026-10-01', 0);
+        INSERT INTO openalex_works (work_id, doi_norm, has_abstract, source_release, is_deleted)
+        VALUES (10, '10.1/d10', 1, '2026-10-01', 0), (20, '10.1/d20', 1, '2026-10-01', 0);
+        INSERT INTO openalex_abstracts (work_id, abstract, source_release, is_deleted)
+        VALUES (10, 'OA ten', '2026-10-01', 0), (20, 'OA twenty', '2026-10-01', 0);
+        {_full_build("_new", group)}
+        {_publish(group)}
+        INSERT INTO papers (corpusid, externalids, source_release, is_deleted)
+        VALUES (1, {{'DOI': '10.1/d20'}}, '2026-10-02', 0);
+        {statements};
+        SELECT corpusid, shared_work FROM paper_xwalk ORDER BY corpusid FORMAT JSONEachRow;
+        SELECT corpusid FROM paper_abstract_best ORDER BY corpusid FORMAT JSONEachRow;
+    """
+    # Paper 2 is updated only for shared_work: the search diff never sees it.
+    assert clickhouse_local(sql, tmp_path) == [
+        {"corpusid": 1, "shared_work": False},
+        {"corpusid": 2, "shared_work": False},
+        {"corpusid": 2},
+    ]
