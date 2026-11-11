@@ -63,8 +63,26 @@ _WORKS: dict[str, str] = {
     "updated_date": "toDateTime(updated_date, 'UTC')",
 }
 
+# Each word paired with each of its positions, sorted by position, then by word bytes; gaps close.
+_ABSTRACT = (
+    "arrayStringConcat(arrayMap(t -> tupleElement(t, 2), arraySort(arrayFlatten(arrayMap("
+    "kv -> arrayMap(p -> (p, tupleElement(kv, 1)), tupleElement(kv, 2)), "
+    "JSONExtractKeysAndValues(index_json, 'Array(UInt32)'))))), ' ')"
+)
+# Positions are checked to fit UInt32, so the typed extraction above cannot clamp one silently.
+_IS_INDEX = (
+    "index_json IN ('', 'null') OR (JSONType(index_json) = 'Object' "
+    "AND length(JSONExtractKeys(index_json)) = length(arrayDistinct(JSONExtractKeys(index_json))) "
+    "AND arrayAll(kv -> JSONType(tupleElement(kv, 2)) = 'Array' "
+    "AND arrayAll(p -> JSONType(p) = 'Int64' AND JSONExtractInt(p) BETWEEN 0 AND 4294967295, "
+    "JSONExtractArrayRaw(tupleElement(kv, 2))), JSONExtractKeysAndValuesRaw(index_json)))"
+)
+
 SELECTS: Mapping[DatasetName, Mapping[str, str]] = MappingProxyType(
-    {"works": MappingProxyType(_WORKS)}
+    {
+        "works": MappingProxyType(_WORKS),
+        "works-abstracts": MappingProxyType({"work_id": _WORK_ID, "abstract": _ABSTRACT}),
+    }
 )
 
 _WITH: Mapping[DatasetName, tuple[tuple[str, str], ...]] = MappingProxyType(
@@ -76,6 +94,7 @@ _WITH: Mapping[DatasetName, tuple[tuple[str, str], ...]] = MappingProxyType(
                 "doi_stripped",
             ),
         ),
+        "works-abstracts": (("ifNull(abstract_inverted_index, '')", "index_json"),),
     }
 )
 
@@ -87,6 +106,10 @@ CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
                 (f"{name} IS NOT NULL", f"openalex_works: {name} breaks the contract")
                 for name in ("is_xpac", "is_retracted", "is_paratext", "updated_date")
             ),
+        ),
+        "works-abstracts": (
+            (_IS_WORK, "openalex_abstracts: id breaks the contract"),
+            (_IS_INDEX, "openalex_abstracts: abstract_inverted_index breaks the contract"),
         ),
     }
 )
