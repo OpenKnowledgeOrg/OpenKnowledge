@@ -30,10 +30,10 @@ from openknowledge_core.ingestion.read_tables import (
 )
 from tests.fakes.ports import NEXT, PRODUCER, RELEASE, applied_release, clock
 
-PAPERS, OUT, IN, XWALK = READ_TABLES
+PAPERS, OUT, IN, XWALK, BEST = READ_TABLES
 S2 = ("papers", "citations")
 S2_TABLES = GROUPS["papers"] + GROUPS["citations"]
-QUARTERLY_XWALK = "paper_xwalk@openalex_works"
+QUARTERLY = {table: f"{table}@openalex_works" for table in GROUPS["openalex"]}
 OA_UUID = {"openalex_works": 50, "openalex_abstracts": 51}
 FULL, INCREMENTAL, CURRENT = ReadTablesPath.FULL, ReadTablesPath.INCREMENTAL, ReadTablesPath.CURRENT
 
@@ -50,6 +50,7 @@ FULL, INCREMENTAL, CURRENT = ReadTablesPath.FULL, ReadTablesPath.INCREMENTAL, Re
         "papers_moved",
         "openalex_moved",
         "openalex_unsettled",
+        "no_abstracts",
     ],
 )
 async def test_read_tables_current_only_for_all_sources(table: str, state: str) -> None:
@@ -59,11 +60,17 @@ async def test_read_tables_current_only_for_all_sources(table: str, state: str) 
         loaded = state.startswith("openalex_")
         if "param_table" in request.url.params:
             name = request.url.params["param_table"]
-            found = {"uuid": str(UUID(int=OA_UUID[name])), "total_rows": 100 if loaded else 0}
+            found = {
+                "uuid": str(UUID(int=OA_UUID.get(name, 1))),
+                "total_rows": 100 if loaded or name == "abstracts" else 0,
+            }
             return httpx.Response(200, text=json.dumps(found))
         if query.startswith("SELECT count() AS rows FROM"):
             return httpx.Response(200, text='{"rows": 0}')
-        if target in OA_UUID or target == QUARTERLY_XWALK:
+        # Before the first abstracts load, the openalex group is skipped and never built.
+        if state == "no_abstracts" and target in ("abstracts", *GROUPS["openalex"]):
+            return httpx.Response(200)
+        if target in OA_UUID or target in QUARTERLY.values():
             # A quarterly marker 2026-10-14 on the live crosswalk; OpenAlex now holds 2027-01-13,
             # or, unsettled, only its works table does, so a build skips the group.
             if not loaded:
@@ -108,7 +115,7 @@ async def test_read_tables_current_only_for_all_sources(table: str, state: str) 
         )
         assert await edges.is_current(
             {"papers": NEXT if state == "papers_moved" else RELEASE, "citations": RELEASE}
-        ) is (state in ("current_empty", "openalex_unsettled"))
+        ) is (state in ("current_empty", "openalex_unsettled", "no_abstracts"))
 
 
 def marker(target: str, release: str, uuid: int = 1, from_release: str | None = None) -> str:
@@ -282,9 +289,9 @@ def in_order(events: Iterable[str], prefixes: Iterable[str]) -> bool:
 )
 async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: str) -> None:
     server = FakeClickHouse()
-    # The crosswalk is current, so these builds concern the S2 groups alone.
-    server.history = [marker(name, NEXT) for name in S2] + [
-        marker(XWALK, NEXT, server.live[XWALK].int)
+    # The openalex group is current, so these builds concern the S2 groups alone.
+    server.history = [marker(name, NEXT) for name in (*S2, "abstracts")] + [
+        marker(table, NEXT, server.live[table].int) for table in GROUPS["openalex"]
     ]
     initial = server.live.copy()
     failed = False
@@ -355,7 +362,7 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         stages.clear()
         server.free_space, server.columns = 12800, {OUT, IN}
         result = await edges.build(PRODUCER, clock)
-        assert result.source_releases == {"papers": NEXT, "citations": NEXT}
+        assert result.source_releases == {"papers": NEXT, "citations": NEXT, "abstracts": NEXT}
         assert result.paths == {"papers": FULL, "citations": FULL, "openalex": CURRENT}
         assert await edges.is_current(result.source_releases)
     assert [name for name, state in stages if state == "completed"] == [
@@ -407,9 +414,10 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
     caplog.set_level(logging.INFO)
     server = FakeClickHouse()
     moved = {"papers": "papers", "in_only": "", "in_only_mismatch": ""}.get(case, "citations")
-    for source in S2:
+    # Abstracts move with papers, so the openalex group follows a papers diff.
+    for source in (*S2, "abstracts"):
         server.history.append(marker(source, RELEASE, 9 if case == "rebased" else 1))
-        if source == moved:
+        if source == moved or (source == "abstracts" and moved == "papers"):
             start = None if case == "new_base" else RELEASE
             server.history.append(marker(source, NEXT, from_release=start))
         else:
@@ -572,7 +580,16 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
 
 
 @pytest.mark.parametrize(
-    "case", ["no_openalex", "new_openalex", "papers_diff", "kept_delta", "partial_openalex"]
+    "case",
+    [
+        "no_openalex",
+        "new_openalex",
+        "papers_diff",
+        "kept_delta",
+        "partial_openalex",
+        "abstracts_behind",
+        "no_abstracts",
+    ],
 )
 async def test_openalex_group_rebuilds_alone_and_records_its_release(
     case: str, caplog: pytest.LogCaptureFixture
@@ -581,18 +598,20 @@ async def test_openalex_group_rebuilds_alone_and_records_its_release(
     server.touched = {"papers": 4, "citations": 5, "openalex": 3}
     held = {"new_openalex": "2027-01-13", "no_openalex": None}.get(case, "2026-10-14")
     server.openalex_rows = 0 if held is None else 100
-    for source in S2:
-        server.history.append(marker(source, RELEASE))
+    for source in (*S2, "abstracts"):
+        if not (case == "no_abstracts" and source == "abstracts"):
+            server.history.append(marker(source, RELEASE))
     if case not in ("no_openalex", "new_openalex"):
         server.history.append(marker("papers", NEXT, from_release=RELEASE))
+    if case in ("papers_diff", "kept_delta", "partial_openalex"):
+        server.history.append(marker("abstracts", NEXT, from_release=RELEASE))
     for table in S2_TABLES:
         server.history.append(marker(table, RELEASE, server.live[table].int))
     if held is not None:
         server.history += [marker(table, held, uuid) for table, uuid in OA_UUID.items()]
-        server.history += [
-            marker(XWALK, RELEASE, server.live[XWALK].int),
-            marker(QUARTERLY_XWALK, "2026-10-14", server.live[XWALK].int),
-        ]
+        for table, target in QUARTERLY.items():
+            server.history.append(marker(table, RELEASE, server.live[table].int))
+            server.history.append(marker(target, "2026-10-14", server.live[table].int))
     if case == "papers_diff":
         # The touched share is of the live papers: an empty crosswalk must not force a rebuild.
         server.counts[XWALK] = 0
@@ -625,15 +644,19 @@ async def test_openalex_group_rebuilds_alone_and_records_its_release(
     if case == "no_openalex":
         assert result.paths == {"papers": CURRENT, "citations": CURRENT, "openalex": FULL}
         assert not any(event.startswith(f"EXCHANGE TABLES {PAPERS}") for event in writes)
-        assert [found["target"] for found in recorded] == [XWALK]
+        assert [found["target"] for found in recorded] == [XWALK, BEST]
         assert "openalex_works" not in result.source_releases
     elif case == "new_openalex":
         assert result.paths == {"papers": CURRENT, "citations": CURRENT, "openalex": FULL}
         assert {(found["target"], found["release"]) for found in recorded} == {
             (XWALK, RELEASE),
-            (QUARTERLY_XWALK, "2027-01-13"),
+            (BEST, RELEASE),
+            (QUARTERLY[XWALK], "2027-01-13"),
+            (QUARTERLY[BEST], "2027-01-13"),
         }
-        assert all(found["target_uuid"] == str(server.live[XWALK]) for found in recorded)
+        for found in recorded:
+            table = found["target"].partition("@")[0]
+            assert found["target_uuid"] == str(server.live[table])
         assert f"DROP TABLE IF EXISTS {DELTA['openalex']}" in server.events
         assert result.source_releases["openalex_works"] == "2027-01-13"
     elif case == "papers_diff":
@@ -648,12 +671,20 @@ async def test_openalex_group_rebuilds_alone_and_records_its_release(
                 f"INSERT INTO {DELTA['openalex']}",
                 f"INSERT INTO {DELTA['openalex']}",
                 f"DELETE FROM {XWALK}",
+                f"DELETE FROM {BEST}",
                 f"INSERT INTO {XWALK} ",
+                f"INSERT INTO {BEST} ",
                 "INSERT INTO applied",
                 f"DROP TABLE IF EXISTS {DELTA['openalex']}",
             ],
         )
+    elif case == "abstracts_behind":
+        # The group waits at the earlier abstracts release; papers alone moves.
+        assert result.paths == {"papers": INCREMENTAL, "citations": CURRENT, "openalex": CURRENT}
     else:
         assert result.paths == {"papers": INCREMENTAL, "citations": CURRENT}
-        assert not any(XWALK in event for event in writes)
-        assert "openalex_works holds rows past its applied release" in caplog.text
+        assert not any(XWALK in event or BEST in event for event in writes)
+        assert {
+            "partial_openalex": "openalex_works holds rows past its applied release",
+            "no_abstracts": "abstracts holds no completed release; skipping openalex",
+        }[case] in caplog.text

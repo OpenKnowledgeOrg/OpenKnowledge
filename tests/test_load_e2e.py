@@ -482,6 +482,7 @@ def test_measured_failure_retains_partial_writes_and_failure(
 def test_build_read_tables(ports: dict[str, str]) -> None:
     query(ports, "TRUNCATE TABLE citations")
     query(ports, "TRUNCATE TABLE papers")
+    query(ports, "TRUNCATE TABLE abstracts")
     deployments.ensure_limits()
     env = {
         "OKP_CLICKHOUSE_URL": f"http://127.0.0.1:{ports['CLICKHOUSE_PORT']}",
@@ -518,6 +519,9 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
     ][:3]
     archive(ports, "2026-10-19", [json.dumps(row) for row in papers], "papers")
     ran(ports, "load", "--release", "2026-10-19", "--dataset", "papers")
+    abstracts = FIXTURE.with_name("abstracts.jsonl").read_text().splitlines()
+    archive(ports, "2026-10-19", abstracts, "abstracts")
+    ran(ports, "load", "--release", "2026-10-19", "--dataset", "abstracts")
     query(ports, "SYSTEM STOP MERGES papers")
     query(
         ports,
@@ -530,10 +534,17 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
         assert result.exit_code == 0, result.output
         built = json.loads(result.output.splitlines()[-1])
         assert built["paths"] == {"papers": "full", "citations": "full", "openalex": "full"}
-        assert built["source_releases"] == {"papers": "2026-10-19", "citations": "2026-10-20"}
+        assert built["source_releases"] == {
+            "papers": "2026-10-19",
+            "citations": "2026-10-20",
+            "abstracts": "2026-10-19",
+        }
         assert built["tables"]["papers_slim"]["rows"] == 2
         # No OpenAlex release is loaded: the crosswalk is built empty, with no quarterly marker.
         assert built["tables"]["paper_xwalk"]["rows"] == 0
+        # Paper 102 is deleted, so only 101 keeps its S2 abstract.
+        assert built["tables"]["paper_abstract_best"]["rows"] == 1
+        assert query(ports, "SELECT corpusid, source FROM paper_abstract_best") == "101\ts2\n"
         assert query(ports, "SELECT corpusid, title FROM papers_slim ORDER BY corpusid") == (
             "101\tA Synthetic Paper\n18446744073709551615\tLatest title\n"
         )
@@ -543,17 +554,18 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
                 ports,
                 "SELECT target, argMax(release, applied_at) AS release FROM applied "
                 "WHERE target IN ('papers_slim', 'citation_edges_out', 'citation_edges_in', "
-                "'paper_xwalk') "
+                "'paper_xwalk', 'paper_abstract_best') "
                 "GROUP BY target ORDER BY target FORMAT JSONEachRow",
             ).splitlines()
         ]
         assert markers == [
             {"target": "citation_edges_in", "release": "2026-10-20"},
             {"target": "citation_edges_out", "release": "2026-10-20"},
+            {"target": "paper_abstract_best", "release": "2026-10-19"},
             {"target": "paper_xwalk", "release": "2026-10-19"},
             {"target": "papers_slim", "release": "2026-10-19"},
         ]
-        quarterly = "SELECT count() FROM applied WHERE target = 'paper_xwalk@openalex_works'"
+        quarterly = "SELECT count() FROM applied WHERE target LIKE '%@openalex_works'"
         assert query(ports, quarterly) == "0\n"
         for table in ("citation_edges_out", "citation_edges_in"):
             assert built["tables"][table]["rows"] == 3
@@ -615,4 +627,5 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
     assert query(ports, "SELECT count() FROM applied WHERE target = 'papers_slim'") == "2\n"
     query(ports, "SYSTEM START MERGES citations")
     query(ports, "SYSTEM START MERGES papers")
+    query(ports, "TRUNCATE TABLE abstracts")
     query(ports, "TRUNCATE TABLE citations")
