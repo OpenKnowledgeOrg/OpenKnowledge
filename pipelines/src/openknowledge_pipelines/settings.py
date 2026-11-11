@@ -33,6 +33,8 @@ class CommonSettings(BaseSettings):
     task_retry_delay_seconds: NonNegativeFloat = 30.0
     image_digest: ImageDigest | None = None
     """The image digest okp records in receipts, manifests and load records."""
+    download_connect_timeout_seconds: PositiveFloat = 30.0
+    download_read_timeout_seconds: PositiveFloat = 300.0
 
 
 class PipelineSettings(CommonSettings):
@@ -42,8 +44,11 @@ class PipelineSettings(CommonSettings):
     s2_attempts: PositiveInt = 8
     s2_backoff_seconds: PositiveFloat = 1.0
     s2_timeout_seconds: PositiveFloat = 30.0
-    download_connect_timeout_seconds: PositiveFloat = 30.0
-    download_read_timeout_seconds: PositiveFloat = 300.0
+
+
+class OpenAlexSettings(CommonSettings):
+    openalex_base_url: HttpUrl = HttpUrl("https://openalex.s3.amazonaws.com/")
+    openalex_timeout_seconds: PositiveFloat = 30.0
 
 
 class LoadSettings(CommonSettings):
@@ -88,8 +93,8 @@ class SearchSettings(LoadSettings):
         return url
 
 
-class BatchSettings(PipelineSettings):
-    sync: SyncCommand | None = None
+class BatchJobSettings(CommonSettings):
+    """What every source needs to run its downloads as Batch jobs."""
 
     image_digest: ImageDigest  # pyright: ignore[reportIncompatibleVariableOverride, reportGeneralTypeIssues]
     """Batch tasks run the image at this digest."""
@@ -99,14 +104,24 @@ class BatchSettings(PipelineSettings):
     batch_network: str
     batch_subnetwork: str
     batch_image_repository: str
-    batch_s2_key_secret: str
-    """The Secret Manager version Batch puts in each task's S2_API_KEY."""
     batch_machine_type: str = "e2-standard-2"
     batch_parallelism: PositiveInt = 1
     batch_provisioning_model: Literal["SPOT", "STANDARD"] = "SPOT"
     batch_max_run_seconds: PositiveInt = 6 * 60 * 60
     batch_poll_seconds: PositiveFloat = 30.0
     batch_wait_timeout_seconds: PositiveFloat = 24 * 60 * 60
+
+
+class BatchSettings(PipelineSettings, BatchJobSettings):
+    sync: SyncCommand | None = None
+
+    batch_s2_key_secret: str
+    """The Secret Manager version Batch puts in each task's S2_API_KEY."""
+
+
+class OpenAlexBatchSettings(OpenAlexSettings, BatchJobSettings):
+    batch_openalex_parallelism: PositiveInt = 8
+    """Tasks at once, bounded by the region's external-IP and Spot CPU quotas."""
 
 
 class SyncSettings(BatchSettings, LoadSettings):  # pyright: ignore[reportIncompatibleVariableOverride]
