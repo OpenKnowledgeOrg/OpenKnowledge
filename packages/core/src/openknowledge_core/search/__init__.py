@@ -9,6 +9,7 @@ from openknowledge_core.search.commands import (
 from openknowledge_core.search.errors import BulkRefused, SearchRejected, SearchUnavailable
 from openknowledge_core.search.models import (
     AbstractRow,
+    BestAbstractRow,
     CorpusSlice,
     DeleteDocument,
     IndexDocument,
@@ -16,12 +17,14 @@ from openknowledge_core.search.models import (
     SearchDocument,
     SourceRows,
     TldrRow,
+    release_version,
 )
 from openknowledge_core.search.ports import SearchSink, SearchSource
 from openknowledge_core.search.service import SearchIndexService, document_operation
 
 __all__ = [
     "AbstractRow",
+    "BestAbstractRow",
     "BulkRefused",
     "CorpusSlice",
     "DeleteDocument",
@@ -40,4 +43,5 @@ __all__ = [
     "SourceRows",
     "TldrRow",
     "document_operation",
+    "release_version",
 ]

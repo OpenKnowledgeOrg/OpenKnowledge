@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
@@ -84,7 +85,10 @@ class PaperRow(BaseModel):
 
 
 class AbstractRow(BaseModel):
-    """One row of ``abstracts`` as a search source reads it; a tombstone carries defaults."""
+    """The latest ``abstracts`` row, tombstones included, for its version alone.
+
+    The text comes from ``paper_abstract_best``.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -92,7 +96,22 @@ class AbstractRow(BaseModel):
     version: NonNegativeInt
     source_release: ReleaseId
     is_deleted: bool
-    abstract: str = ""
+
+
+class BestAbstractRow(BaseModel):
+    """A paper's row of ``paper_abstract_best``: its S2 abstract, else its OpenAlex one."""
+
+    model_config = ConfigDict(frozen=True)
+
+    corpusid: NonNegativeInt
+    abstract: str
+    source: Literal["s2", "openalex"]
+    work_id: NonNegativeInt | None = None
+
+
+def release_version(release: ReleaseId) -> int:
+    """The version of a live row at ``release``, as ClickHouse's ``toUInt64(release) * 2``."""
+    return (date.fromisoformat(release) - date(1970, 1, 1)).days * 2
 
 
 class TldrRow(BaseModel):
@@ -108,7 +127,7 @@ class TldrRow(BaseModel):
 
 
 class SourceRows(BaseModel):
-    """The rows of one corpus ID in all three tables, each absent where the table has none."""
+    """The rows of one corpus ID in the source tables, each absent where the table has none."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -116,6 +135,7 @@ class SourceRows(BaseModel):
     paper: PaperRow | None = None
     abstract: AbstractRow | None = None
     tldr: TldrRow | None = None
+    best: BestAbstractRow | None = None
 
 
 class Journal(BaseModel):
@@ -154,6 +174,7 @@ class SearchDocument(BaseModel):
     corpusid: str
     title: str | None = None
     abstract: str | None = None
+    abstract_source: Literal["s2", "openalex"] | None = None
     tldr: str | None = None
     authors: tuple[Author, ...] = ()
     venue: str | None = None

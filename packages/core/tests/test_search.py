@@ -10,6 +10,8 @@ from openknowledge_core.search import (
     SearchRejected,
     SourceRows,
     TldrRow,
+    document_operation,
+    release_version,
 )
 from tests.fakes.ports import (
     NEXT,
@@ -17,11 +19,12 @@ from tests.fakes.ports import (
     FakeSearchSink,
     FakeSearchSource,
     abstract_row,
+    best_row,
     paper_row,
 )
 
 V1, V2 = 41464, 41478  # the versions of a live row at RELEASE and at NEXT
-INDEX = "papers-v2"
+INDEX = "papers-v3"
 
 
 def service(
@@ -58,6 +61,7 @@ async def test_a_base_pass_writes_every_document_with_the_largest_version(
             corpusid=101,
             paper=paper,
             abstract=abstract_row(101, abstract_version),
+            best=best_row(101),
             tldr=TldrRow(
                 corpusid=101,
                 version=tldr_version,
@@ -77,8 +81,9 @@ async def test_a_base_pass_writes_every_document_with_the_largest_version(
     assert settings["index"]["number_of_shards"] == 2
     version, source_101 = sink.indices[INDEX]["101"]
     assert version == expected_version and source_101 is not None
-    assert set(source_101) <= PAPERS.names and source_101["contract_version"] == 2
+    assert set(source_101) <= PAPERS.names and source_101["contract_version"] == 3
     assert source_101["abstract"] == "A synthetic abstract."
+    assert source_101["abstract_source"] == "s2"
     assert source_101["externalids"] == {"DOI": "10.1000/EXAMPLE.1"}
     assert source_101["s2fieldsofstudy"] == [{"category": "Computer Science"}]
     assert source_101["journal"] == {"name": "Example Journal", "volume": "IV", "pages": "1-9"}
@@ -157,3 +162,51 @@ async def test_a_slice_with_no_rows_writes_nothing() -> None:
         (0, -1),
         (0, 0),
     ]
+
+
+async def test_versions_never_fall_below_the_openalex_release() -> None:
+    floor = release_version("2026-10-14")
+    assert (release_version(RELEASE), floor) == (V1, 41480)
+    source, sink = FakeSearchSource(), FakeSearchSink()
+    base = IndexPapers(index=INDEX, release=RELEASE, part=1, parts=1, openalex_release="2026-10-14")
+    source.base_rows = [
+        SourceRows(
+            corpusid=101, paper=paper_row(101, V1), best=best_row(101, "OA text", "openalex", 7)
+        )
+    ]
+    await service(source, sink).index(base)
+    version, document = sink.indices[INDEX]["101"]
+    assert version == floor and document is not None
+    assert (document["abstract"], document["abstract_source"]) == ("OA text", "openalex")
+    # An S2 abstract from a release older than OpenAlex's replaces the OpenAlex text: without
+    # the floor its version would be below the document's and be refused.
+    diff = base.model_copy(update={"release": NEXT, "from_release": RELEASE})
+    source.diff_rows = [
+        SourceRows(
+            corpusid=101,
+            paper=paper_row(101, V1),
+            abstract=abstract_row(101, V2),
+            best=best_row(101, "S2 text"),
+        ),
+        SourceRows(
+            corpusid=102,
+            paper=paper_row(102, V1),
+            abstract=AbstractRow(
+                corpusid=102, version=V2 + 1, source_release=NEXT, is_deleted=True
+            ),
+            best=best_row(102, "OA fallback", "openalex", 8),
+        ),
+    ]
+    await service(source, sink).index(diff)
+    version, document = sink.indices[INDEX]["101"]
+    assert version == floor and document is not None
+    assert (document["abstract"], document["abstract_source"]) == ("S2 text", "s2")
+    version, document = sink.indices[INDEX]["102"]
+    assert version == floor and document is not None and document["abstract"] == "OA fallback"
+    # With an older OpenAlex release, versions are the S2 ones.
+    older = document_operation(
+        SourceRows(corpusid=103, paper=paper_row(103, V1), best=best_row(103, "x", "openalex", 9)),
+        3,
+        release_version("2026-10-01"),
+    )
+    assert older is not None and older.version == V1

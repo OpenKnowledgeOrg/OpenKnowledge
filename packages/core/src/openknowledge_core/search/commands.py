@@ -26,6 +26,8 @@ class IndexPapers(BaseModel):
     part: PositiveInt
     parts: PositiveInt
     bounds: tuple[int, int] | None = None
+    openalex_release: ReleaseId | None = None
+    """The OpenAlex release the index is built from; no document version falls below it."""
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
