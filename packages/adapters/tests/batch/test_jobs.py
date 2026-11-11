@@ -283,3 +283,51 @@ def test_batch_worker_context_identifies_the_admitted_operation() -> None:
     spec = job_spec(CONFIG, JOB)
     variables = spec["taskGroups"][0]["taskSpec"]["environment"]["variables"]
     assert variables == {**CONFIG.environment, "OKP_BATCH_OPERATION_ID": JOB.operation_id.hex}
+
+
+def test_an_openalex_job_runs_okp_openalex_without_the_s2_key() -> None:
+    job = ShardJob(
+        source="openalex",
+        release_id="2026-10-14",
+        dataset="authors",
+        bucket="raw",
+        prefix="openalex",
+        shards=tuple(range(517)),
+    )
+    oa_config = CONFIG.model_copy(update={"secrets": {}})
+    spec = job_spec(oa_config, job)
+    group = spec["taskGroups"][0]
+    assert group["taskSpec"]["runnables"][0]["container"]["commands"][:2] == [
+        "openalex",
+        "download-shard",
+    ]
+    assert group["taskSpec"]["environment"]["secretVariables"] == {}
+    assert (len(group["taskEnvironments"]), group["parallelism"]) == (517, 8)
+    assert spec["labels"].items() >= {"source": "openalex", "archive-family": "openalex"}.items()
+    s2_job = job.model_copy(update={"source": "semantic-scholar", "prefix": "s2"})
+    assert job_spec(CONFIG, s2_job)["labels"]["archive-family"] == "core"
+    assert job_id(job).startswith("oa-authors-2026-10-14-")
+    assert job_id(s2_job).startswith("s2-authors-2026-10-14-")
+    assert job_id(job) != job_id(s2_job)
+
+
+async def test_each_source_waits_only_for_its_own_jobs() -> None:
+    def job(name: str, labels: dict[str, str]) -> dict[str, Any]:
+        return {"name": name, "labels": labels, "status": {"state": "RUNNING"}}
+
+    pages = [
+        [
+            job("oa", {"operation-id": "1", "source": "openalex", "archive-family": "openalex"}),
+            job("s2-before-source-label", {"operation-id": "2", "archive-family": "core"}),
+            job("s2-legacy", {"operation-id": "3", "dataset": "authors"}),
+        ]
+    ]
+    async with (
+        batch_api(web.json_response({}), [], pages) as (root, _),
+        batch.connect(CONFIG, api_root=root, token=cast(Token, FakeToken())) as jobs,
+    ):
+        assert set(await jobs.running(ArchiveFamily.CORE)) == {
+            "s2-before-source-label",
+            "s2-legacy",
+        }
+        assert set(await jobs.running(ArchiveFamily.OPENALEX)) == {"oa"}
