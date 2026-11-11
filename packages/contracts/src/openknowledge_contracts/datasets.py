@@ -149,8 +149,8 @@ class DatasetInventory(ArchiveDocument):
 
     @model_validator(mode="after")
     def _unique(self) -> Self:
-        if not _distinct(self.shards):
-            raise ValueError("every shard needs its own source path and file name")
+        if len({shard.source_path for shard in self.shards}) != len(self.shards):
+            raise ValueError("every shard needs its own source path")
         return self
 
 

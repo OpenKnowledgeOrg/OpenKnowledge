@@ -70,6 +70,7 @@ from openknowledge_core.ingestion.models import (
     ShardLink,
     ShardOutcome,
     StoredObject,
+    archive_name,
     dataset_file_path,
     diff_file_path,
     release_record_path,
@@ -147,6 +148,12 @@ class DownloadDatasetService:
                 f"{command.dataset}; rerun later"
             )
         listed = tuple(link.shard for link in listing.links)
+        folders = self._source.datasets[command.dataset].folders
+        if len({archive_name(shard, folders) for shard in listed}) != len(listed):
+            raise SourceRejected(
+                f"the listing of {command.dataset} {command.release} names two shards with the "
+                f"same path or file name; {AGAIN}"
+            )
         try:
             inventory = DatasetInventory(
                 release_id=command.release,
@@ -178,6 +185,7 @@ class DownloadDatasetService:
             bucket=command.bucket,
             prefix=command.prefix,
             shards=stored.shards,
+            folders=folders,
         )
         self._links[(None, pinned.release_id, pinned.dataset)] = _by_path(listing.links)
         return pinned

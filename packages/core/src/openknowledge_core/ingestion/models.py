@@ -141,6 +141,7 @@ class PinnedDataset(BaseModel):
     shards: tuple[ShardRef, ...]
     from_release: ReleaseId | None = None
     part: DiffPart | None = None
+    folders: NonNegativeInt = 0
 
     @model_validator(mode="after")
     def _diff(self) -> Self:
@@ -163,10 +164,10 @@ class PinnedDataset(BaseModel):
         )
 
     def object_path(self, shard: ShardRef) -> ObjectPath:
-        return self.path(shard.file_name)
+        return self.path(archive_name(shard, self.folders))
 
     def receipt_path(self, shard: ShardRef) -> ObjectPath:
-        return self.path(shard.file_name + RECEIPT_SUFFIX)
+        return self.path(archive_name(shard, self.folders) + RECEIPT_SUFFIX)
 
     @property
     def inventory_path(self) -> ObjectPath:
@@ -184,6 +185,11 @@ class PinnedDataset(BaseModel):
     @property
     def manifest_path(self) -> ObjectPath:
         return self.path(MANIFEST_NAME)
+
+
+def archive_name(shard: ShardRef, folders: int) -> str:
+    """The last folders + 1 segments of the source path, so partition folders stay in names."""
+    return "/".join(shard.source_path.split("/")[-(folders + 1) :])
 
 
 def release_record_path(bucket: str, prefix: str, release_id: str) -> ObjectPath:

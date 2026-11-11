@@ -274,6 +274,43 @@ async def test_a_stored_parquet_copy_unlike_the_listed_size_is_not_receipted(
     assert str(pinned.receipt_path(shard)) not in store.objects
 
 
+async def test_partition_folders_keep_same_named_files_apart(
+    source: FakeSource, store: FakeStore
+) -> None:
+    openalex = Source(
+        name="openalex",
+        prefix="openalex",
+        datasets={"works": ArchivedDataset("parquet", folders=1)},
+        contracts={},
+    )
+    service = DownloadDatasetService(
+        catalog=source,
+        downloads=source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+        source=openalex,
+    )
+    for day in ("2026-10-14", "2026-10-13"):
+        source.add("works", f"updated_date={day}/part_0000.parquet", parquet(10))
+    pinned = await service.pin_dataset(
+        DownloadDataset(release=RELEASE, dataset="works", bucket="raw", prefix="openalex")
+    )
+    assert [str(pinned.object_path(shard)) for shard in pinned.shards] == [
+        f"gs://raw/openalex/{RELEASE}/works/updated_date=2026-10-14/part_0000.parquet",
+        f"gs://raw/openalex/{RELEASE}/works/updated_date=2026-10-13/part_0000.parquet",
+    ]
+
+
+async def test_flat_shards_with_one_file_name_are_still_refused(
+    service: DownloadDatasetService, source: FakeSource
+) -> None:
+    source.add("papers", "a/part-0.gz", gz(b"{}\n"))
+    source.add("papers", "b/part-0.gz", gz(b"{}\n"))
+    with pytest.raises(SourceRejected, match="same path or file name"):
+        await service.pin_dataset(COMMAND)
+
+
 async def pin_works(
     source: FakeSource, store: FakeStore, size: int | None = None
 ) -> tuple[DownloadDatasetService, PinnedDataset]:
