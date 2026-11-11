@@ -340,6 +340,7 @@ NO_PREFECT = """
 import sys
 from contextlib import asynccontextmanager
 from click.testing import CliRunner
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import DownloadDatasetService
 from openknowledge_pipelines import bootstrap, cli
 from tests.fakes.ports import PAPERS, PRODUCER, FakeSource, FakeStore, clock
@@ -351,7 +352,12 @@ for name, data in PAPERS.items():
 @asynccontextmanager
 async def open_service(settings):
     yield DownloadDatasetService(
-        catalog=source, downloads=source, store=FakeStore(), producer=PRODUCER, clock=clock
+        catalog=source,
+        downloads=source,
+        store=FakeStore(),
+        producer=PRODUCER,
+        clock=clock,
+        source=SOURCES["semantic-scholar"],
     )
 
 bootstrap.open_service = open_service

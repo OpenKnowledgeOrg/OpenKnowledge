@@ -6,6 +6,7 @@ import json
 import pytest
 
 from openknowledge_contracts.manifests import DatasetManifest
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import DownloadDatasetService, PinRelease
 from openknowledge_core.ingestion import service as service_module
 from openknowledge_core.ingestion.errors import ArchiveConflict, ReceiptInvalid, SourceRejected
@@ -53,7 +54,12 @@ async def test_a_rerun_reads_the_archive_back_and_keeps_its_order(
     first = await service.pin_dataset(COMMAND)
     source.reorder = True
     rerun = DownloadDatasetService(
-        catalog=source, downloads=source, store=store, producer=PRODUCER, clock=clock
+        catalog=source,
+        downloads=source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+        source=SOURCES["semantic-scholar"],
     )
     assert (await rerun.pin_dataset(COMMAND)).shards == first.shards
 

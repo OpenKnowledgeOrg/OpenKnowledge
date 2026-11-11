@@ -23,13 +23,13 @@ from openknowledge_contracts.datasets import (
 )
 from openknowledge_contracts.manifests import (
     SCHEMA_VERSION,
-    SOURCE,
     DatasetManifest,
     ManifestEntry,
     ObjectPath,
     Producer,
     ShardReceipt,
 )
+from openknowledge_contracts.sources import Source
 from openknowledge_core.ingestion.commands import (
     DownloadDataset,
     DownloadDatasetResult,
@@ -88,12 +88,14 @@ class DownloadDatasetService:
         store: ArtifactStore,
         producer: Producer,
         clock: Callable[[], datetime],
+        source: Source,
     ) -> None:
         self._catalog = catalog
         self._downloads = downloads
         self._store = store
         self._producer = producer
         self._clock = clock
+        self._source = source
         self._links: dict[tuple[str | None, str, str], dict[str, ShardLink]] = {}
 
     @property
@@ -472,7 +474,7 @@ class DownloadDatasetService:
             )
         receipt = ShardReceipt(
             schema_version=SCHEMA_VERSION,
-            source=SOURCE,
+            source=self._source.name,
             release_id=pinned.release_id,
             dataset=pinned.dataset,
             shard=shard,
@@ -481,7 +483,7 @@ class DownloadDatasetService:
             sha256=report.sha256,
             md5=report.md5,
             crc32c=stored.crc32c,
-            schema_ref=_schema_ref(pinned),
+            schema_ref=_schema_ref(self._source, pinned),
             gzip_members=report.gzip_members,
             records=report.records,
             uncompressed_size=report.uncompressed_size,
@@ -517,7 +519,7 @@ class DownloadDatasetService:
             "dataset": pinned.dataset,
             "shard": shard,
             "object": target,
-            "schema": _schema_ref(pinned),
+            "schema": _schema_ref(self._source, pinned),
         }
         named: dict[str, object] = {
             "release": receipt.release_id,
@@ -639,8 +641,8 @@ def _identities(shards: Iterable[ShardRef]) -> frozenset[tuple[str, str]]:
     return frozenset((shard.source_path, shard.file_name) for shard in shards)
 
 
-def _schema_ref(pinned: PinnedDataset) -> str:
-    ref = f"{SOURCE}/{pinned.dataset}@{pinned.release_id}"
+def _schema_ref(source: Source, pinned: PinnedDataset) -> str:
+    ref = f"{source.name}/{pinned.dataset}@{pinned.release_id}"
     return f"{ref}/deletes" if pinned.part == "deletes" else ref
 
 

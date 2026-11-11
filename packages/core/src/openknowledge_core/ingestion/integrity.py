@@ -7,7 +7,7 @@ import hashlib
 import zlib
 from collections.abc import Iterator
 
-from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
+from pydantic import BaseModel, ConfigDict, NonNegativeInt
 
 from openknowledge_contracts.manifests import Md5Base64, Sha256Hex
 from openknowledge_core.ingestion.errors import GzipInvalid, IncompleteTransfer
@@ -21,7 +21,7 @@ class IntegrityReport(BaseModel):
     size: NonNegativeInt
     sha256: Sha256Hex
     md5: Md5Base64
-    gzip_members: PositiveInt
+    gzip_members: NonNegativeInt
     records: NonNegativeInt
     uncompressed_size: NonNegativeInt
 
