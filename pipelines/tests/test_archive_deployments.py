@@ -11,10 +11,15 @@ from prefect.client.orchestration import PrefectClient
 from prefect.client.schemas.objects import ConcurrencyLeaseHolder
 from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
 
-from openknowledge_core.ingestion import DownloadDatasetService, ShardJobs
+from openknowledge_core.ingestion import (
+    ArchiveRelease,
+    DownloadDatasetService,
+    ShardJob,
+    ShardJobs,
+)
 from openknowledge_pipelines import admission, bootstrap, deployments
-from openknowledge_pipelines.settings import BatchSettings, LoadSettings
-from tests.fakes.ports import COMMAND, DIFF, FakeSource, FakeStore
+from openknowledge_pipelines.settings import BatchSettings, LoadSettings, OpenAlexBatchSettings
+from tests.fakes.ports import COMMAND, DIFF, FakeJobs, FakeSource, FakeStore
 
 
 @pytest.mark.parametrize("dataset", ["s2orc_v2", "embeddings-specter_v2", "s2orc", "unknown"])
@@ -271,3 +276,41 @@ async def test_closed_admission_refuses_edge_build_before_clickhouse(
     with pytest.raises(admission.AdmissionError, match="closed"):
         await deployments.s2_build_read_tables.fn()
     assert events == ["capacity", "released"]
+
+
+@pytest.mark.usefixtures("prefect_server")
+async def test_a_second_openalex_archive_is_refused_while_one_runs(
+    monkeypatch: pytest.MonkeyPatch, oa_wired: DownloadDatasetService
+) -> None:
+    started, gate = asyncio.Event(), asyncio.Event()
+
+    class BlockedJobs(FakeJobs):
+        async def submit(self, job: ShardJob) -> str:
+            started.set()
+            await gate.wait()
+            return await super().submit(job)
+
+    jobs = BlockedJobs(oa_wired, failing=set())
+
+    @asynccontextmanager
+    async def open_openalex_download(
+        settings: OpenAlexBatchSettings,
+    ) -> AsyncGenerator[tuple[DownloadDatasetService, ShardJobs]]:
+        yield oa_wired, jobs
+
+    monkeypatch.setattr(deployments, "OpenAlexBatchSettings", OpenAlexBatchSettings.model_construct)
+    monkeypatch.setattr(bootstrap, "open_openalex_download", open_openalex_download)
+    deployments.ensure_limits()
+    first = asyncio.create_task(
+        deployments.openalex_batch_download.fn(
+            ArchiveRelease(release="2026-10-06", bucket="raw", dataset="works")
+        )
+    )
+    await started.wait()
+    with pytest.raises(ConcurrencySlotAcquisitionError):
+        await deployments.openalex_batch_download.fn(
+            ArchiveRelease(release="2026-10-06", bucket="raw", dataset="works-deleted")
+        )
+    gate.set()
+    assert (await first).datasets[0].dataset == "works"
+    assert jobs.deleted == []
