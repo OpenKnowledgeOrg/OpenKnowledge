@@ -4,9 +4,19 @@ import zlib
 
 import pytest
 
-from openknowledge_core.ingestion.errors import GzipInvalid, IncompleteTransfer
-from openknowledge_core.ingestion.integrity import MAX_OUTPUT_STEP, GzipCheck, StreamCheck
-from tests.fakes.ports import gz
+from openknowledge_core.ingestion.errors import (
+    GzipInvalid,
+    IncompleteTransfer,
+    ParquetInvalid,
+    RowCountMismatch,
+)
+from openknowledge_core.ingestion.integrity import (
+    MAX_OUTPUT_STEP,
+    GzipCheck,
+    ParquetCheck,
+    StreamCheck,
+)
+from tests.fakes.ports import gz, parquet
 
 
 @pytest.mark.parametrize(
@@ -89,3 +99,26 @@ def test_stream_check_compares_the_declared_length() -> None:
     with pytest.raises(IncompleteTransfer, match="where 999 were due"):
         check.finish(999)
     assert check.report is None
+
+
+@pytest.mark.parametrize("step", [1, 7, 1 << 20])
+def test_parquet_check_counts_footer_rows_in_any_chunking(step: int) -> None:
+    data = parquet(rows=1000, row_group_size=300)
+    check = ParquetCheck(expected_records=1000)
+    for start in range(0, len(data), step):
+        check.update(data[start : start + step])
+    report = check.finish(len(data))
+    assert (report.records, report.gzip_members, report.size) == (1000, 0, len(data))
+    assert report.sha256 == hashlib.sha256(data).hexdigest()
+
+
+def test_parquet_check_refuses_a_truncated_file_and_a_footer_unlike_the_manifest() -> None:
+    data = parquet(rows=10, row_group_size=5)
+    truncated = ParquetCheck()
+    truncated.update(data[:-1])
+    with pytest.raises(ParquetInvalid):
+        truncated.finish(len(data) - 1)
+    wrong = ParquetCheck(expected_records=11)
+    wrong.update(data)
+    with pytest.raises(RowCountMismatch, match="10 rows.*11"):
+        wrong.finish(len(data))

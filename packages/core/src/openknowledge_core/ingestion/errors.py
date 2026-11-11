@@ -100,6 +100,10 @@ class GzipInvalid(IntegrityError):
     pass
 
 
+class ParquetInvalid(IntegrityError):
+    pass
+
+
 class IncompleteTransfer(IntegrityError):
     pass
 

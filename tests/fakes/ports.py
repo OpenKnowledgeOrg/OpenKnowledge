@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 from pydantic import SecretStr
 
 from openknowledge_contracts.datasets import DatasetSummary, ReleaseId, ReleaseMetadata, ShardRef
@@ -64,6 +66,13 @@ def gz(payload: bytes) -> bytes:
     return gzip.compress(payload, mtime=0)
 
 
+def parquet(rows: int, row_group_size: int | None = None) -> bytes:
+    sink = pa.BufferOutputStream()
+    table = pa.table({"id": [f"https://openalex.org/W{i}" for i in range(1, rows + 1)]})  # pyright: ignore[reportUnknownMemberType]
+    pq.write_table(table, sink, row_group_size=row_group_size)  # pyright: ignore[reportUnknownMemberType]
+    return sink.getvalue().to_pybytes()
+
+
 PAPERS = {"part-0.gz": gz(b'{"id": 1}\n'), "part-1.gz": gz(b'{"id": 2}\n' * 50)}
 COMMAND = DownloadDataset(release=RELEASE, dataset="papers", bucket="raw", prefix="s2")
 NEXT = "2026-10-13"
@@ -115,6 +124,7 @@ class FakeSource:
         self.unavailable: list[str] = []
         self.cut: set[str] = set()
         self.declared: dict[str, int | None] = {}
+        self.records: dict[str, int] = {}
         self.reorder = False
         self.diffs: dict[str, list[tuple[str, str, list[str], list[str]]]] = {}
         self.diff_files: dict[str, bytes] = {}
@@ -160,6 +170,7 @@ class FakeSource:
                     f"https://files.test{shard_ref(dataset, name).source_path}"
                     f"?AWSAccessKeyId=AKIAFAKE&Signature=secret{self.listings}"
                 ),
+                records=self.records.get(name),
             )
             for name in names
         )

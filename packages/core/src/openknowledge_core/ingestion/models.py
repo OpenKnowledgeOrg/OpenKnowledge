@@ -66,6 +66,8 @@ class ShardLink(BaseModel):
 
     shard: ShardRef
     url: SecretStr
+    size: NonNegativeInt | None = None
+    records: NonNegativeInt | None = None
 
 
 class DatasetListing(BaseModel):

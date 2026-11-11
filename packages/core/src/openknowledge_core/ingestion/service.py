@@ -47,13 +47,19 @@ from openknowledge_core.ingestion.errors import (
     InventoryChanged,
     LinkExpired,
     ManifestIncomplete,
+    ParquetInvalid,
     ReceiptInvalid,
     ShardNotListed,
     SourceRejected,
     StoredCopyMismatch,
     StoreUnavailable,
 )
-from openknowledge_core.ingestion.integrity import IntegrityReport, StreamCheck
+from openknowledge_core.ingestion.integrity import (
+    IntegrityReport,
+    ObjectCheck,
+    ParquetCheck,
+    StreamCheck,
+)
 from openknowledge_core.ingestion.models import (
     ByteStream,
     CheckedStream,
@@ -73,6 +79,7 @@ log = logging.getLogger(__name__)
 
 JSON = "application/json"
 GZIP = "application/gzip"
+PARQUET = "application/vnd.apache.parquet"
 RECEIPT_LIMIT = 64 * 1024
 DOCUMENT_LIMIT = 16 * 1024 * 1024
 AGAIN = "rerun later, and report it to Semantic Scholar if it repeats"
@@ -349,22 +356,35 @@ class DownloadDatasetService:
     async def _download(self, pinned: PinnedDataset, shard: ShardRef) -> bool:
         """Stream the shard into a new object and receipt it, or return False if one appeared."""
         target = pinned.object_path(shard)
-        source = await self._open(pinned, shard)
+        source, link = await self._open(pinned, shard)
+        parquet = self._is_parquet(pinned)
         async with aclosing(source.chunks) as chunks:
             if source.expected_size is None:
                 raise IncompleteTransfer(
                     f"{shard.file_name}: the file host sent no length, so nothing was uploaded; "
                     "rerun later"
                 )
+            if link.size is not None and link.size != source.expected_size:
+                raise IncompleteTransfer(
+                    f"{shard.file_name}: the file host sent {source.expected_size} bytes where "
+                    f"the source lists {link.size}, so nothing was uploaded; rerun later"
+                )
+            if source.expected_size == 0 and parquet:
+                raise ParquetInvalid(
+                    f"{shard.file_name}: the file host says the shard is empty, which no Parquet "
+                    "file is, so nothing was uploaded; rerun later"
+                )
             if source.expected_size == 0:
                 raise GzipInvalid(
                     f"{shard.file_name}: the file host says the shard is empty, which no gzip "
                     "file is, so nothing was uploaded; rerun later"
                 )
-            check = StreamCheck()
+            check = ParquetCheck(link.records) if parquet else StreamCheck()
             body = _verified(chunks, check, source.expected_size)
             try:
-                stored = await self._store.create_from_stream(target, body, content_type=GZIP)
+                stored = await self._store.create_from_stream(
+                    target, body, content_type=PARQUET if parquet else GZIP
+                )
             except IntegrityError as exc:
                 raise type(exc)(
                     f"{shard.file_name}: {exc}; nothing was stored, so a rerun downloads it again"
@@ -379,13 +399,18 @@ class DownloadDatasetService:
         await self._write_receipt(pinned, shard, stored, check.report)
         return True
 
-    async def _open(self, pinned: PinnedDataset, shard: ShardRef) -> ByteStream:
+    def _is_parquet(self, pinned: PinnedDataset) -> bool:
+        return self._source.datasets[pinned.dataset].format == "parquet"
+
+    async def _open(self, pinned: PinnedDataset, shard: ShardRef) -> tuple[ByteStream, ShardLink]:
         try:
-            return await self._downloads.open(await self._link(pinned, shard, refresh=False))
+            link = await self._link(pinned, shard, refresh=False)
+            return await self._downloads.open(link), link
         except LinkExpired:
             log.info("%s: the link expired, fetching a fresh listing", shard.file_name)
         try:
-            return await self._downloads.open(await self._link(pinned, shard, refresh=True))
+            link = await self._link(pinned, shard, refresh=True)
+            return await self._downloads.open(link), link
         except LinkExpired as exc:
             message = f"{shard.file_name}: a freshly listed link was refused too ({exc})"
         raise LinkExpired(f"{message}; {AGAIN}")
@@ -431,7 +456,8 @@ class DownloadDatasetService:
         """Receipt a stored object only if its length still matches what the source declares."""
         path = existing.ref.path
         log.info("%s: %s has no receipt, checking the stored copy", shard.file_name, path)
-        declared = await self._open(pinned, shard)
+        declared, link = await self._open(pinned, shard)
+        parquet = self._is_parquet(pinned)
         async with aclosing(declared.chunks):
             pass  # only the declared length is needed, not the body
         if declared.expected_size is None:
@@ -446,14 +472,14 @@ class DownloadDatasetService:
                 f"{declared.expected_size}; {_delete_hint(path)}"
             )
         source = await self._store.open_read(existing.ref)
-        check = StreamCheck()
+        check = ParquetCheck(link.records) if parquet else StreamCheck()
         try:
             async with aclosing(source.chunks) as chunks:
                 async for chunk in chunks:
                     check.update(chunk)
             report = check.finish(existing.size)
         except IntegrityError as exc:
-            raise type(exc)(
+            raise (StoredCopyMismatch if parquet else type(exc))(
                 f"the stored copy {path} fails its check ({exc}); {_delete_hint(path)}"
             ) from None
         await self._write_receipt(pinned, shard, existing, report)
@@ -618,7 +644,7 @@ async def read_small(store: ArtifactStore, stored: StoredObject, limit: int) -> 
     return bytes(data)
 
 
-def _verified(chunks: AsyncIterator[bytes], check: StreamCheck, size: int) -> CheckedStream:
+def _verified(chunks: AsyncIterator[bytes], check: ObjectCheck, size: int) -> CheckedStream:
     async def checked() -> AsyncGenerator[bytes, None]:
         async for chunk in chunks:
             check.update(chunk)
