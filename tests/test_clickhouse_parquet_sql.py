@@ -15,8 +15,16 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from openknowledge_adapters.clickhouse.load_sql import query_parameters
-from openknowledge_adapters.clickhouse.parquet_sql import SELECTS, parquet_upsert_query
+from openknowledge_adapters.clickhouse.load_sql import (
+    duplicates_parameters,
+    query_parameters,
+    removed_query,
+)
+from openknowledge_adapters.clickhouse.parquet_sql import (
+    SELECTS,
+    parquet_duplicates_query,
+    parquet_upsert_query,
+)
 from openknowledge_contracts.sources import all_contracts
 from openknowledge_contracts.tables import DatasetContract
 from openknowledge_contracts.tables.clickhouse import table_columns
@@ -282,3 +290,56 @@ def test_a_malformed_index_stops_the_insert(tmp_path: Path, bad: str) -> None:
     )  # fmt: skip
     assert result.returncode != 0
     assert "openalex_abstracts: abstract_inverted_index breaks the contract" in result.stderr
+
+
+def load(workdir: Path, contract: DatasetContract, name: str, release: str) -> None:
+    sql = f"{up()}\n{parquet_upsert_query(contract, 'file')};"
+    clickhouse_local(sql, workdir / "db", **params(workdir / name, release))
+
+
+def mark_removed(workdir: Path, contract: DatasetContract, release: str) -> None:
+    clickhouse_local(f"{removed_query(contract)};", workdir / "db", source_release=release)
+
+
+def final_rows(workdir: Path, table: str) -> dict[int, tuple[bool, str]]:
+    sql = f"SELECT work_id, removed, source_release FROM {table} FINAL FORMAT JSONEachRow;"
+    rows = clickhouse_local(sql, workdir / "db")
+    return {row["work_id"]: (row["removed"], row["source_release"]) for row in rows}
+
+
+def duplicates(workdir: Path, contract: DatasetContract, names: list[str]) -> dict[str, Any]:
+    sql = parquet_duplicates_query(contract, len(names), "file") + "\nFORMAT JSONEachRow"
+    files = duplicates_parameters([str(workdir / name) for name in names])
+    (row,) = clickhouse_local(sql, workdir / "db", **files)
+    return row
+
+
+@needs_clickhouse
+def test_a_newer_release_flags_works_it_no_longer_lists_in_both_tables(tmp_path: Path) -> None:
+    write_works(
+        tmp_path / "a1.parquet", [work("https://openalex.org/W1"), work("https://openalex.org/W2")]
+    )
+    write_works(tmp_path / "b1.parquet", [work("https://openalex.org/W1")])
+    for contract in (WORKS, WORKS_ABSTRACTS):
+        load(tmp_path, contract, "a1.parquet", release="2026-10-14")
+        load(tmp_path, contract, "b1.parquet", release="2027-01-13")
+        mark_removed(tmp_path, contract, release="2027-01-13")
+        assert final_rows(tmp_path, contract.table) == {
+            1: (False, "2027-01-13"),
+            2: (True, "2027-01-13"),
+        }
+
+
+@needs_clickhouse
+def test_a_work_repeated_across_files_is_identical_or_conflicting(tmp_path: Path) -> None:
+    write_works(tmp_path / "x.parquet", [work("https://openalex.org/W5", title="T")])
+    write_works(tmp_path / "y.parquet", [work("https://openalex.org/W5", title="T")])
+    write_works(tmp_path / "z.parquet", [work("https://openalex.org/W5", title="U")])
+    assert duplicates(tmp_path, WORKS, ["x.parquet", "y.parquet"]) == {
+        "identical_rows": 1,
+        "conflicting_keys": 0,
+        "examples": [],
+    }
+    assert duplicates(tmp_path, WORKS, ["x.parquet", "z.parquet"])["examples"] == ["(5)"]
+    # A release names every works file in one query, which ClickHouse parses up to 256 KiB.
+    assert len(parquet_duplicates_query(WORKS, 1898).encode()) < 256 * 1024
