@@ -306,11 +306,14 @@ async def test_a_second_openalex_archive_is_refused_while_one_runs(
             ArchiveRelease(release="2026-10-06", bucket="raw", dataset="works")
         )
     )
-    await started.wait()
-    with pytest.raises(ConcurrencySlotAcquisitionError):
-        await deployments.openalex_batch_download.fn(
-            ArchiveRelease(release="2026-10-06", bucket="raw", dataset="works-deleted")
-        )
-    gate.set()
+    try:
+        async with asyncio.timeout(60):
+            await started.wait()
+            with pytest.raises(ConcurrencySlotAcquisitionError):
+                await deployments.openalex_batch_download.fn(
+                    ArchiveRelease(release="2026-10-06", bucket="raw", dataset="works-deleted")
+                )
+    finally:
+        gate.set()
     assert (await first).datasets[0].dataset == "works"
     assert jobs.deleted == []
