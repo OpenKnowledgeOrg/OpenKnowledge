@@ -313,12 +313,12 @@ async def test_partitioned_archives_complete(source: FakeSource, store: FakeStor
         source=SOURCES["openalex"],
     )
     for day in ("2026-10-14", "2026-10-13"):
-        source.add("works", f"updated_date={day}/part_0000.parquet", parquet(10))
-    command = DownloadDataset(release=RELEASE, dataset="works", bucket="raw", prefix="openalex")
+        source.add("authors", f"updated_date={day}/part_0000.parquet", parquet(10))
+    command = DownloadDataset(release=RELEASE, dataset="authors", bucket="raw", prefix="openalex")
     pinned = await service.pin_dataset(command)
     for shard in pinned.shards:
         await service.archive_shard(pinned, shard)
-    await ArchiveProgress(store, service, PRODUCER, clock).finalize(command)
+    await ArchiveProgress(store, service, PRODUCER, clock, SOURCES["openalex"]).finalize(command)
     assert str(completion_path(command)) in store.objects
 
 

@@ -209,7 +209,13 @@ async def open_archive_progress(
     settings: PipelineSettings,
 ) -> AsyncGenerator[ArchiveProgress, None]:
     async with open_service(settings) as service, gcs.connect(_gcs(settings)) as store:
-        yield ArchiveProgress(store, service, producer(settings), lambda: datetime.now(UTC))
+        yield ArchiveProgress(
+            store,
+            service,
+            producer(settings),
+            lambda: datetime.now(UTC),
+            SOURCES["semantic-scholar"],
+        )
 
 
 @asynccontextmanager
@@ -229,7 +235,13 @@ async def open_sync(
         clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
         open_read_tables(settings, stage=read_table_stage) as edges,
     ):
-        progress = ArchiveProgress(store, service, producer(settings), lambda: datetime.now(UTC))
+        progress = ArchiveProgress(
+            store,
+            service,
+            producer(settings),
+            lambda: datetime.now(UTC),
+            SOURCES["semantic-scholar"],
+        )
         loader = LoadDatasetService(
             store=store,
             tables=ch.tables,
@@ -258,7 +270,7 @@ async def open_sync(
 @asynccontextmanager
 async def open_archive_consumer(settings: CommonSettings) -> AsyncGenerator[ArchiveConsumer]:
     async with gcs.connect(_gcs(settings)) as store:
-        yield ArchiveConsumer(store)
+        yield ArchiveConsumer(store, SOURCES["semantic-scholar"])
 
 
 @asynccontextmanager

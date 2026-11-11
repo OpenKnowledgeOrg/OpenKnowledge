@@ -558,6 +558,7 @@ def test_read_base_cli_without_source_key_or_control_api(
     import asyncio
     import gzip
 
+    from openknowledge_contracts.sources import SOURCES
     from openknowledge_core.ingestion.archive_progress import ArchiveProgress
     from openknowledge_core.ingestion.consumers import ConsumeBase
 
@@ -571,7 +572,9 @@ def test_read_base_cli_without_source_key_or_control_api(
     async def archive() -> None:
         pinned = await service.pin_dataset(command)
         await service.archive_shard(pinned, pinned.shards[0])
-        await ArchiveProgress(store, service, PRODUCER, clock).finalize(command)
+        await ArchiveProgress(
+            store, service, PRODUCER, clock, SOURCES["semantic-scholar"]
+        ).finalize(command)
 
     asyncio.run(archive())
     before = dict(store.objects)
@@ -631,6 +634,7 @@ def test_verify_manifest_remains_read_only_without_admission(
     source: FakeSource,
     store: FakeStore,
 ) -> None:
+    from openknowledge_contracts.sources import SOURCES
     from openknowledge_core.ingestion.archive_progress import ArchiveProgress
 
     source.add("s2orc_v2", "part.gz", PAPERS["part-0.gz"])
@@ -646,7 +650,7 @@ def test_verify_manifest_remains_read_only_without_admission(
 
     @asynccontextmanager
     async def progress(settings: PipelineSettings) -> AsyncGenerator[ArchiveProgress]:
-        yield ArchiveProgress(store, service, PRODUCER, clock)
+        yield ArchiveProgress(store, service, PRODUCER, clock, SOURCES["semantic-scholar"])
 
     def forbidden() -> None:
         pytest.fail("read-only verification must not acquire admission")

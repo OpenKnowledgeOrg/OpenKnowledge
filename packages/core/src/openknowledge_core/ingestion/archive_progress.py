@@ -21,7 +21,7 @@ from openknowledge_contracts.manifests import (
     Producer,
     Sha256Hex,
 )
-from openknowledge_contracts.sources import archive_folders
+from openknowledge_contracts.sources import Source
 from openknowledge_core.ingestion.commands import (
     BatchDiffDownloadResult,
     DownloadDataset,
@@ -101,7 +101,7 @@ def _completion_identity(
         raise ArchiveConflict("archive completion kind mismatch")
 
 
-def _seed(command: DownloadDataset | DownloadDiff) -> PinnedDataset:
+def _seed(source: Source, command: DownloadDataset | DownloadDiff) -> PinnedDataset:
     if isinstance(command, DownloadDiff):
         return PinnedDataset(
             shards=(),
@@ -118,13 +118,14 @@ def _seed(command: DownloadDataset | DownloadDiff) -> PinnedDataset:
         dataset=command.dataset,
         bucket=command.bucket,
         prefix=command.prefix,
-        folders=archive_folders(command.dataset),
+        folders=source.datasets[command.dataset].folders,
     )
 
 
 class ArchiveReader:
-    def __init__(self, store: ArtifactStore) -> None:
+    def __init__(self, store: ArtifactStore, source: Source) -> None:
         self._store = store
+        self._source = source
 
     async def reference(self, path: ObjectPath) -> HashedRef:
         stored = await self._store.stat(path)
@@ -156,7 +157,7 @@ class ArchiveReader:
         command: DownloadDataset | DownloadDiff,
         inventory: HashedRef,
     ) -> tuple[PinnedDataset, ...]:
-        seed = _seed(command)
+        seed = _seed(self._source, command)
         if inventory.ref.path != seed.inventory_path:
             raise ArchiveConflict("archive inventory path mismatch")
         if isinstance(command, DownloadDiff):
@@ -215,8 +216,9 @@ class ArchiveProgress(ArchiveReader):
         downloads: DownloadDatasetService,
         producer: Producer,
         clock: Callable[[], datetime],
+        source: Source,
     ) -> None:
-        super().__init__(store)
+        super().__init__(store, source)
         self._downloads = downloads
         self._producer = producer
         self._clock = clock
@@ -225,7 +227,7 @@ class ArchiveProgress(ArchiveReader):
         self,
         command: DownloadDataset | DownloadDiff,
     ) -> tuple[HashedRef, tuple[HashedRef, ...]]:
-        seed = _seed(command)
+        seed = _seed(self._source, command)
         inventory = await self.reference(seed.inventory_path)
         manifests: list[HashedRef] = []
         for part in await self._inventory_parts(command, inventory):

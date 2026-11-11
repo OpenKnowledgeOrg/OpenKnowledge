@@ -113,7 +113,9 @@ class Cycle:
             source=SOURCES["semantic-scholar"],
         )
         self.jobs = FakeJobs(self.downloads, failing=set())
-        self.progress = ArchiveProgress(self.store, self.downloads, PRODUCER, clock)
+        self.progress = ArchiveProgress(
+            self.store, self.downloads, PRODUCER, clock, SOURCES["semantic-scholar"]
+        )
         self.loader = LoadDatasetService(
             store=self.store,
             tables=self.tables,

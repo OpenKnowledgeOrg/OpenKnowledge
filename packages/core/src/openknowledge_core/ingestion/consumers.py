@@ -22,6 +22,7 @@ from pydantic import (
 
 from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.manifests import ManifestEntry, ObjectRef
+from openknowledge_contracts.sources import Source
 from openknowledge_core.ingestion.archive_progress import ArchiveReader, HashedRef
 from openknowledge_core.ingestion.commands import DownloadDataset
 from openknowledge_core.ingestion.errors import IngestionError, ObjectChanged
@@ -111,9 +112,9 @@ def parse_paper(dataset: str, line: bytes) -> FulltextPaper | EmbeddingPaper:
 
 
 class ArchiveConsumer:
-    def __init__(self, store: ArtifactStore) -> None:
+    def __init__(self, store: ArtifactStore, source: Source) -> None:
         self._store = store
-        self._reader = ArchiveReader(store)
+        self._reader = ArchiveReader(store, source)
 
     async def stream(self, command: ConsumeBase) -> AsyncGenerator[ArchivePaper]:
         """Use aclosing around this generator when stopping early; records are a base prefix.
