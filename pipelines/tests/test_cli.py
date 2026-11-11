@@ -226,11 +226,15 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_batch_download_embeddings_diff,
         deployments.openalex_batch_download,
         deployments.openalex_load,
+        deployments.openalex_release_check,
         deployments.watchdog,
     ]
-    assert [found.concurrency_limit for found in served] == [1] * 12 + [None]
-    _coordinator, *unscheduled, watchdog = served
+    assert [found.concurrency_limit for found in served] == [1] * 13 + [None]
+    _coordinator, *unscheduled, check, watchdog = served
     assert [found.schedules for found in unscheduled] == [[]] * 11
+    # Off until enabled: each new release downloads about 800 GB and reindexes every paper.
+    [weekly] = cast("list[DeploymentScheduleCreate]", check.schedules)
+    assert weekly.active is False
     [scheduled] = cast("list[DeploymentScheduleCreate]", watchdog.schedules)
     assert isinstance(scheduled.schedule, CronSchedule)
     # from_flow stores no timezone for a cron, and the server reads None as UTC.
@@ -939,9 +943,13 @@ def test_openalex_load_fills_every_table_without_an_s2_key(
     code, output = okp_oa("load", "--release", OPENALEX_RELEASE, *OA_TARGET)
     assert code == 0, output
     result = json.loads(output.splitlines()[-1])
-    tables_loaded = [(result[name]["table"], result[name]["loaded"]) for name in result]
-    assert tables_loaded == [("sources", 2), ("works", 2), ("works-abstracts", 2)]
-    assert {result[name]["live_rows"] for name in result} == {14}
+    loads = [result[name] for name in ("sources", "works", "abstracts")]
+    assert [(load["table"], load["loaded"]) for load in loads] == [
+        ("sources", 2),
+        ("works", 2),
+        ("works-abstracts", 2),
+    ]
+    assert {load["live_rows"] for load in loads} == {14}
 
 
 @pytest.mark.usefixtures("oa_wired")

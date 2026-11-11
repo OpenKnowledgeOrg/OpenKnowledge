@@ -18,6 +18,7 @@ from prefect.deployments.runner import RunnerDeployment
 from prefect.exceptions import ObjectNotFound
 from prefect.types.entrypoint import EntrypointType
 
+from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
     ArchiveRelease,
@@ -32,6 +33,7 @@ from openknowledge_core.ingestion import (
     LoadDiffResult,
     OpenAlexLoad,
     OpenAlexLoadResult,
+    PinRelease,
     WatchdogResult,
 )
 from openknowledge_core.ingestion.coordinator import SyncResult
@@ -39,13 +41,14 @@ from openknowledge_core.ingestion.errors import DatasetNotInRelease, IngestionEr
 from openknowledge_core.ingestion.families import ArchiveFamily, require_family
 from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 from openknowledge_pipelines import admission, bootstrap
-from openknowledge_pipelines.flows.openalex_load import load_release
+from openknowledge_pipelines.flows.openalex_load import check_release, load_then_build
 from openknowledge_pipelines.flows.s2_sync import run_sync
 from openknowledge_pipelines.flows.sync_observability import SyncObservation
 from openknowledge_pipelines.settings import (
     BatchSettings,
     LoadSettings,
     OpenAlexBatchSettings,
+    OpenAlexSettings,
     ScheduleSettings,
     SyncSettings,
     WatchdogSettings,
@@ -206,18 +209,54 @@ async def s2_batch_download_embeddings_diff(command: DownloadDiff) -> BatchDiffD
 
 
 @flow(name="openalex-load", persist_result=False)
-async def openalex_load(command: OpenAlexLoad) -> OpenAlexLoadResult:
-    """Under the ClickHouse limit, so it never overlaps an S2 load or the read-table build."""
+async def openalex_load(command: OpenAlexLoad, wait: bool = False) -> OpenAlexLoadResult:
+    """Under the ClickHouse limit, so it never overlaps an S2 load or the read-table build.
+
+    The read tables are built after the load, and the search index follows this flow's runs.
+    With ``wait``, it queues behind a running S2 sync instead of refusing to start.
+    """
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]
     async with (
-        one_clickhouse_loader(wait=False),
+        one_clickhouse_loader(wait=wait),
         admission.execution(),
         bootstrap.open_load_service(settings) as service,
+        bootstrap.open_read_tables(settings) as read_tables,
     ):
         flows = bootstrap.load_flows(
             service, settings, parallelism=settings.openalex_load_parallelism
         )
-        return await load_release(flows.dataset.fn, command)
+        return await load_then_build(
+            flows.dataset.fn,
+            lambda: read_tables.build(bootstrap.producer(settings), lambda: datetime.now(UTC)),
+            command,
+        )
+
+
+@flow(name="openalex-release-check", persist_result=False, retries=0)
+async def openalex_release_check(prefix: str = "openalex") -> OpenAlexLoadResult | None:
+    """Archive and load OpenAlex's release once it is new, into the bucket the loads read."""
+    bucket = LoadSettings().clickhouse_raw_bucket  # pyright: ignore[reportCallIssue]
+    settings = OpenAlexSettings()  # pyright: ignore[reportCallIssue]
+
+    async def latest() -> ReleaseId:
+        async with admission.execution(), bootstrap.open_openalex_service(settings) as service:
+            return (await service.catalog.resolve_release("latest")).release_id
+
+    async def archived(release: ReleaseId) -> bool:
+        async with admission.execution(), bootstrap.open_openalex_service(settings) as service:
+            return await service.archived(
+                DownloadDataset(release=release, dataset="works", bucket=bucket, prefix=prefix)
+            )
+
+    async def take(release: ReleaseId) -> OpenAlexLoadResult:
+        async with admission.execution(), bootstrap.open_openalex_service(settings) as service:
+            await service.pin_release(PinRelease(release=release, bucket=bucket, prefix=prefix))
+        await openalex_batch_download(ArchiveRelease(release=release, bucket=bucket, prefix=prefix))
+        return await openalex_load(
+            OpenAlexLoad(release=release, bucket=bucket, prefix=prefix), wait=True
+        )
+
+    return await check_release(latest, archived, take)
 
 
 @flow(name="openalex-batch-download", persist_result=False)
@@ -293,6 +332,23 @@ async def s2_sync() -> SyncResult:
             return await run_sync(settings.sync, services, observation=observation)
     finally:
         await observation.publish(sys.exception())
+
+
+def openalex_check_deployment() -> RunnerDeployment:
+    """Weekly, and off until enabled: each new release downloads about 800 GB."""
+    return RunnerDeployment.from_flow(
+        openalex_release_check,
+        DEPLOYMENT,
+        entrypoint_type=EntrypointType.MODULE_PATH,
+        schedules=[
+            DeploymentScheduleCreate(
+                slug="openalex-release-check",
+                schedule=CronSchedule(cron="0 4 * * 1", timezone="Europe/Zurich"),
+                active=ScheduleSettings().openalex_check_schedule_enabled,
+            )
+        ],
+        concurrency_limit=1,
+    )
 
 
 def sync_deployment() -> RunnerDeployment:
@@ -391,6 +447,7 @@ def serve() -> None:
             entrypoint_type=EntrypointType.MODULE_PATH,
             concurrency_limit=1,
         ),
+        openalex_check_deployment(),
         # Every 6 hours, for a log alert; it needs no S2 key, so it takes no limit.
         RunnerDeployment.from_flow(
             watchdog,
