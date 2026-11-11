@@ -123,6 +123,16 @@ class DownloadDatasetService:
                 f"Semantic Scholar sent release {metadata.release_id} when asked for "
                 f"{command.release}; rerun later"
             )
+        for document in await self._catalog.release_documents(metadata.release_id):
+            await self._archive_bytes(
+                ObjectPath.under(
+                    command.bucket, command.prefix, metadata.release_id, document.name
+                ),
+                document.data,
+                "application/json"
+                if document.name.endswith(".json")
+                else "application/octet-stream",
+            )
         path = release_record_path(command.bucket, command.prefix, metadata.release_id)
         record = ReleaseRecord(retrieved_at=self._clock(), metadata=metadata)
         await self._archive(
@@ -614,6 +624,20 @@ class DownloadDatasetService:
             return None if data is None else ReleaseRecord.from_json(data).metadata.release_id
         except ValueError:
             return None
+
+    async def _archive_bytes(self, path: ObjectPath, data: bytes, content_type: str) -> None:
+        """Create ``data``, or require the stored copy to match it exactly."""
+        if await self._store.create(path, data, content_type=content_type) is not None:
+            return
+        stored = await self._store.stat(path)
+        if stored is None:
+            raise _vanished(path)
+        existing = await read_small(self._store, stored, len(data))
+        if existing != data:
+            raise ArchiveConflict(
+                f"{path} holds different bytes than the source sent for it this run; "
+                f"it stays as it is until someone compares the two and removes one"
+            )
 
     async def _archive[D: ArchiveDocument](
         self,
