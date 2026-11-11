@@ -37,6 +37,7 @@ _SCALARS: dict[pa.DataType, str] = {
     pa.float64(): "Float64",
     pa.string(): "String",
     pa.date32(): "Date",
+    pa.timestamp("s"): "DateTime",
 }
 
 

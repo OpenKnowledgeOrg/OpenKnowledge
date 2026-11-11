@@ -15,7 +15,7 @@ def test_the_s2_source_holds_every_s2_contract_as_gzip_lines() -> None:
     assert contract_for("papers") == (s2, PAPERS)
     assert PAPERS.archived == "papers"
     with pytest.raises(KeyError):
-        contract_for("works")
+        contract_for("works-deleted")
 
 
 def test_a_registry_refuses_a_repeated_contract_and_an_unarchived_dataset() -> None:
