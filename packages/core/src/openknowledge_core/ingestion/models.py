@@ -45,6 +45,7 @@ from openknowledge_contracts.manifests import (
     ObjectRef,
     Sha256Hex,
 )
+from openknowledge_contracts.sources import SourceName
 from openknowledge_contracts.tables.contract import UpdateMode
 
 type Operation = Literal["upsert", "delete"]
@@ -372,6 +373,7 @@ class ShardJob(BaseModel):
 
     operation_id: UUID = Field(default_factory=uuid4)
     """One logical submission, retained across retries and renewed for the next round."""
+    source: SourceName = "semantic-scholar"
     release_id: ReleaseId
     dataset: DatasetName
     bucket: BucketName
