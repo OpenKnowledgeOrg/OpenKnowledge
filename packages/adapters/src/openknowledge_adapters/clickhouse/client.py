@@ -43,8 +43,10 @@ class ClickHouseClient:
         self._http = http
         self._database = database
 
-    async def rows(self, query: str, **parameters: str) -> list[dict[str, Any]]:
-        response = await self.post(f"{query} FORMAT JSONEachRow", **parameters)
+    async def rows(
+        self, query: str, *, query_id: str | None = None, **parameters: str
+    ) -> list[dict[str, Any]]:
+        response = await self.post(f"{query} FORMAT JSONEachRow", query_id=query_id, **parameters)
         return [json.loads(line) for line in response.text.splitlines()]
 
     async def stream(self, query: str, **parameters: str) -> AsyncGenerator[dict[str, Any]]:

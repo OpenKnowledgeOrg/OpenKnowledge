@@ -154,3 +154,20 @@ async def test_abstracts_load_from_the_archived_works_parquet() -> None:
     assert (table.archive, table.name, written) == ("works", "openalex_abstracts", 2)
     assert table.load_sql_sha256 == sql_sha256(parquet_upsert_query(WORKS_ABSTRACTS))
     assert queries[-1] == parquet_upsert_query(WORKS_ABSTRACTS)
+
+
+async def test_a_retried_parquet_duplicates_check_keeps_its_query_id() -> None:
+    ids: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        ids.append(request.url.params["query_id"])
+        row: dict[str, object] = {"identical_rows": 1, "conflicting_keys": 0, "examples": []}
+        return httpx.Response(200, text=json.dumps(row))
+
+    paths = [
+        ObjectPath(bucket="raw", name=f"openalex/2026-10-14/works/part_{i}.parquet") for i in (0, 1)
+    ]
+    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
+        for _ in range(2):
+            await ch.tables.duplicates("works", paths)
+    assert ids[0] == ids[1]
