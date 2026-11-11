@@ -1,14 +1,17 @@
 """SQL that loads one archived Parquet object into a table projected from it.
 
 The Parquet columns are typed, so a load reads only the columns it names and derives each table
-column with one expression. Values a column cannot hold stop the insert with
+column with one expression. Hive partitioning stays off: archived names keep OpenAlex's
+``updated_date=<day>`` folder, which ClickHouse would otherwise read as the ``updated_date``
+column in place of the file's own. Values a column cannot hold stop the insert with
 ``<table>: <field> breaks the contract``, as the JSON loads do. The SELECT list is positional and
 carries no aliases, so no alias can shadow a Parquet column of the same name.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import posixpath
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 
 from openknowledge_adapters.clickhouse.load_sql import (
@@ -23,6 +26,7 @@ from openknowledge_contracts.datasets import DatasetName
 from openknowledge_contracts.tables import DatasetContract
 from openknowledge_contracts.tables.fields import fields_of
 
+_NO_HIVE = "use_hive_partitioning = 0"
 # 'https://openalex.org/W' is 22 characters; 19 digits always fit UInt64.
 _WORK_ID = "toUInt64(substring(id, 23))"
 _IS_WORK = "id IS NOT NULL AND match(id, '^https://openalex\\\\.org/W[1-9][0-9]{0,18}$')"
@@ -46,8 +50,12 @@ _WORKS: dict[str, str] = {
     "is_xpac": "is_xpac",
     "is_retracted": "is_retracted",
     "is_paratext": "is_paratext",
-    # The abstracts load checks the index; parsing it here too would read it a second time.
-    "has_abstract": "ifNull(abstract_inverted_index, '') NOT IN ('', 'null', '{}')",
+    # Not parsed here, which would read every index a second time. The abstracts check refuses
+    # empty words and empty position lists, so an index beyond these spellings of nothing
+    # always rebuilds to a non-empty abstract.
+    "has_abstract": (
+        "NOT match(ifNull(abstract_inverted_index, ''), '^\\\\s*(null|\\\\{\\\\s*\\\\})?\\\\s*$')"
+    ),
     "oa_status": "tupleElement(open_access, 'oa_status')",
     "is_oa": "tupleElement(open_access, 'is_oa')",
     "oa_url": "tupleElement(open_access, 'oa_url')",
@@ -73,9 +81,10 @@ _ABSTRACT = (
 )
 # Positions are checked to fit UInt32, so the typed extraction above cannot clamp one silently.
 _IS_INDEX = (
-    "index_json IN ('', 'null') OR (JSONType(index_json) = 'Object' "
+    "match(index_json, '^\\\\s*(null)?\\\\s*$') OR (JSONType(index_json) = 'Object' "
     "AND length(JSONExtractKeys(index_json)) = length(arrayDistinct(JSONExtractKeys(index_json))) "
-    "AND arrayAll(kv -> JSONType(tupleElement(kv, 2)) = 'Array' "
+    "AND arrayAll(kv -> tupleElement(kv, 1) != '' AND JSONType(tupleElement(kv, 2)) = 'Array' "
+    "AND length(JSONExtractArrayRaw(tupleElement(kv, 2))) > 0 "
     "AND arrayAll(p -> JSONType(p) = 'Int64' AND JSONExtractInt(p) BETWEEN 0 AND 4294967295, "
     "JSONExtractArrayRaw(tupleElement(kv, 2))), JSONExtractKeysAndValuesRaw(index_json)))"
 )
@@ -157,7 +166,7 @@ def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> st
     )
     return (
         f"INSERT INTO {identifier(contract.table)} ({columns})\n"
-        "SETTINGS insert_null_as_default = 0\n"
+        f"SETTINGS insert_null_as_default = 0, {_NO_HIVE}\n"
         f"{_with(contract.name)}"
         f"SELECT\n    {selected}\n"
         f"FROM {_source(source)}\n"
@@ -165,22 +174,19 @@ def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> st
     )
 
 
-def parquet_duplicates_query(contract: DatasetContract, objects: int, source: Source = "s3") -> str:
-    """Keys that repeat across the objects ``source_file_0`` to ``source_file_<objects - 1>``.
+def parquet_duplicates_query(contract: DatasetContract, source: Source = "s3") -> str:
+    """Keys that repeat across the objects ``source_files`` names, as one glob.
 
-    Rows repeat identically when every stored value is the same. Each object is read with
-    ``SELECT *`` so the query stays short for thousands of objects; ClickHouse still reads only
-    the Parquet columns the hash uses.
+    Rows repeat identically when every stored value is the same. One read of all objects keeps
+    the plan small for thousands of them, where one read per object exceeds ClickHouse's
+    limit on plan optimizations.
     """
     selects = SELECTS[contract.name]
     key = ", ".join(selects[name] for name in contract.key)
-    files = "\n    UNION ALL\n    ".join(
-        f"SELECT * FROM {_source(source, f'source_file_{index}')}" for index in range(objects)
-    )
     records = (
         f"{_with(contract.name)}SELECT tuple({key}) AS record_key, "
         f"cityHash64(tuple({', '.join(selects.values())})) AS record_hash\n"
-        f"FROM (\n    {files}\n)"
+        f"FROM {_source(source, 'source_files')}"
     )
     keys = (
         "SELECT record_key, count() AS n, min(record_hash) != max(record_hash) AS conflicting\n"
@@ -191,8 +197,21 @@ def parquet_duplicates_query(contract: DatasetContract, objects: int, source: So
         "    sumIf(n - 1, NOT conflicting) AS identical_rows,\n"
         "    countIf(conflicting) AS conflicting_keys,\n"
         f"    groupArrayIf({EXAMPLES})(toString(record_key), conflicting) AS examples\n"
-        f"FROM (\n{keys}\n)"
+        f"FROM (\n{keys}\n)\n"
+        f"SETTINGS {_NO_HIVE}"
     )
+
+
+def parquet_duplicates_parameters(source_files: Sequence[str]) -> dict[str, str]:
+    """``source_files`` as one glob: their common folder, then each rest as an alternative.
+
+    S3 lists only under that folder, and the alternatives match exactly these objects.
+    """
+    if not source_files or any(set(name) & set("{},*?[]\\") for name in source_files):
+        raise ValueError("Parquet duplicates need object names without glob characters")
+    folder = posixpath.commonpath([name.rpartition("/")[0] for name in source_files]) + "/"
+    rests = ",".join(name.removeprefix(folder) for name in source_files)
+    return {"source_files": f"{folder}{{{rests}}}"}
 
 
 def _with(dataset: DatasetName) -> str:

@@ -16,12 +16,12 @@ import pyarrow.parquet as pq
 import pytest
 
 from openknowledge_adapters.clickhouse.load_sql import (
-    duplicates_parameters,
     query_parameters,
     removed_query,
 )
 from openknowledge_adapters.clickhouse.parquet_sql import (
     SELECTS,
+    parquet_duplicates_parameters,
     parquet_duplicates_query,
     parquet_upsert_query,
 )
@@ -118,6 +118,7 @@ def work(
 
 
 def write_works(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pylist(rows, schema=WORKS_FILE)
     pq.write_table(table, path)  # pyright: ignore[reportUnknownMemberType]
 
@@ -151,8 +152,10 @@ def test_each_parquet_projection_fills_its_contract_in_order() -> None:
 
 @needs_clickhouse
 def test_a_works_file_lands_with_normalised_ids(tmp_path: Path) -> None:
+    # In the archive's own folder, which must not stand in for the file's updated_date.
+    name = "updated_date=2026-10-14/part_0000.parquet"
     write_works(
-        tmp_path / "w.parquet",
+        tmp_path / name,
         [
             work(
                 "https://openalex.org/W2741809807",
@@ -180,7 +183,7 @@ def test_a_works_file_lands_with_normalised_ids(tmp_path: Path) -> None:
             work("https://openalex.org/W8", doi="not-a-doi"),
         ],
     )
-    rows = load_and_select(tmp_path, WORKS, "w.parquet")
+    rows = load_and_select(tmp_path, WORKS, name)
     assert (
         rows["2741809807"].items()
         >= {
@@ -252,6 +255,7 @@ INDEXES = {
     5: None,
     6: '{"gap":[0],"here":[5],"then":[9]}',
     7: '{"b":[1],"a":[1],"x":[0]}',
+    8: "{ }",
 }
 
 
@@ -263,10 +267,12 @@ def test_the_rebuilt_abstract_matches_a_python_decode(tmp_path: Path) -> None:
     )
     rows = load_and_select(tmp_path, WORKS_ABSTRACTS, "a.parquet")
     got = {int(key): row["abstract"] for key, row in rows.items()}
+    flags = load_and_select(tmp_path, WORKS, "a.parquet")
+    assert {k: flags[str(k)]["has_abstract"] for k in got} == {k: v != "" for k, v in got.items()}
     assert got == {k: decode(v) for k, v in INDEXES.items()}
     assert got[1] == "Results show, that it works." and got[2] == "the cat saw the dog"
     assert got[3] == "Über die Größe von 细胞" and got[6] == "gap here then" and got[7] == "x a b"
-    assert got[4] == got[5] == ""
+    assert got[4] == got[5] == got[8] == ""
 
 
 @needs_clickhouse
@@ -280,6 +286,8 @@ def test_the_rebuilt_abstract_matches_a_python_decode(tmp_path: Path) -> None:
         '{"a":0}',
         "[1, 2]",
         "not json",
+        '{"empty":[]}',
+        '{"":[0]}',
     ],
 )
 def test_a_malformed_index_stops_the_insert(tmp_path: Path, bad: str) -> None:
@@ -308,8 +316,8 @@ def final_rows(workdir: Path, table: str) -> dict[int, tuple[bool, str]]:
 
 
 def duplicates(workdir: Path, contract: DatasetContract, names: list[str]) -> dict[str, Any]:
-    sql = parquet_duplicates_query(contract, len(names), "file") + "\nFORMAT JSONEachRow"
-    files = duplicates_parameters([str(workdir / name) for name in names])
+    sql = parquet_duplicates_query(contract, "file") + "\nFORMAT JSONEachRow"
+    files = parquet_duplicates_parameters([str(workdir / name) for name in names])
     (row,) = clickhouse_local(sql, workdir / "db", **files)
     return row
 
@@ -341,8 +349,12 @@ def test_a_work_repeated_across_files_is_identical_or_conflicting(tmp_path: Path
         "examples": [],
     }
     assert duplicates(tmp_path, WORKS, ["x.parquet", "z.parquet"])["examples"] == ["(5)"]
-    # A release names every works file in one query, which ClickHouse parses up to 256 KiB.
-    assert len(parquet_duplicates_query(WORKS, 1898).encode()) < 256 * 1024
+    # A release checks all of its 1,898 works files in one query.
+    names = [f"updated_date=2026-10-{i % 28 + 1:02d}/part_{i:04d}.parquet" for i in range(1898)]
+    for name in names:
+        (tmp_path / name).parent.mkdir(exist_ok=True)
+        (tmp_path / name).hardlink_to(tmp_path / "x.parquet")
+    assert duplicates(tmp_path, WORKS, names)["identical_rows"] == 1897
 
 
 SOURCES_FILE = pa.schema(

@@ -16,6 +16,7 @@ from openknowledge_adapters.clickhouse.load_sql import (
     upsert_query,
 )
 from openknowledge_adapters.clickhouse.parquet_sql import (
+    parquet_duplicates_parameters,
     parquet_duplicates_query,
     parquet_upsert_query,
 )
@@ -121,12 +122,14 @@ class ClickHouseTables:
     async def duplicates(self, dataset: DatasetName, objects: Sequence[ObjectPath]) -> Duplicates:
         names = [self._readable(path).name for path in objects]
         contract = _contract(dataset)
-        query = (
-            parquet_duplicates_query(contract, len(names))
-            if _parquet(contract)
-            else duplicates_query(contract, len(names))
-        )
-        rows = await self._client.rows(query, **duplicates_parameters(names))
+        if _parquet(contract):
+            query, parameters = (
+                parquet_duplicates_query(contract),
+                parquet_duplicates_parameters(names),
+            )
+        else:
+            query, parameters = duplicates_query(contract, len(names)), duplicates_parameters(names)
+        rows = await self._client.rows(query, **parameters)
         return Duplicates.model_validate(rows[0])
 
     async def mark_removed(self, dataset: DatasetName, release: ReleaseId) -> int:
