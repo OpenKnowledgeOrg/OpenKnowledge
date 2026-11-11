@@ -48,6 +48,7 @@ from openknowledge_core.ingestion.service import DownloadDatasetService
 from openknowledge_core.search.errors import BulkRefused
 from openknowledge_core.search.models import (
     AbstractRow,
+    BestAbstractRow,
     BulkOperation,
     DeleteDocument,
     PaperRow,
@@ -600,16 +601,21 @@ def paper_row(corpusid: int, version: int, **values: Any) -> PaperRow:  # noqa: 
     )
 
 
-def abstract_row(corpusid: int, version: int, text: str = "A synthetic abstract.") -> AbstractRow:
-    return AbstractRow(
-        corpusid=corpusid, version=version, source_release=RELEASE, is_deleted=False, abstract=text
-    )
+def abstract_row(corpusid: int, version: int) -> AbstractRow:
+    return AbstractRow(corpusid=corpusid, version=version, source_release=RELEASE, is_deleted=False)
 
 
-def search_document(paper: PaperRow, abstract: AbstractRow | None = None) -> BulkOperation:
-    """The write the core builds for ``paper`` and ``abstract`` at contract version 1."""
-    operation = document_operation(
-        SourceRows(corpusid=paper.corpusid, paper=paper, abstract=abstract), 1
-    )
+def best_row(
+    corpusid: int,
+    text: str = "A synthetic abstract.",
+    source: Literal["s2", "openalex"] = "s2",
+    work_id: int | None = None,
+) -> BestAbstractRow:
+    return BestAbstractRow(corpusid=corpusid, abstract=text, source=source, work_id=work_id)
+
+
+def search_document(paper: PaperRow) -> BulkOperation:
+    """The write the core builds for ``paper`` at contract version 1."""
+    operation = document_operation(SourceRows(corpusid=paper.corpusid, paper=paper), 1)
     assert operation is not None
     return operation
