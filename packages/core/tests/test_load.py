@@ -39,6 +39,7 @@ from tests.fakes.ports import (
     FakeTables,
     clock,
     gz,
+    parquet,
 )
 
 LOAD = LoadDataset(**COMMAND.model_dump())
@@ -322,7 +323,7 @@ async def test_conflicting_keys_in_the_update_files_fail_the_diff(
 
 async def test_a_contract_reads_the_manifest_of_its_archived_dataset(store: FakeStore) -> None:
     object_path = ObjectPath.under("raw", "openalex", RELEASE, "works", "part-0.parquet")
-    data = gz(b'{"id": 1}\n')
+    data = parquet(1)
     entry = ManifestEntry(
         object_ref=ObjectRef(path=object_path, generation=store.put(object_path, data)),
         size=len(data),

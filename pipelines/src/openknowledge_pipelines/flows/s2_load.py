@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from types import CoroutineType
 from typing import Any
@@ -33,7 +34,11 @@ class S2LoadFlows:
 
 
 def s2_load_flows(
-    service: LoadDatasetService, *, task_retries: int, retry_delay_seconds: float
+    service: LoadDatasetService,
+    *,
+    task_retries: int,
+    retry_delay_seconds: float,
+    parallelism: int = 1,
 ) -> S2LoadFlows:
     @task(
         name="prepare-load",
@@ -93,11 +98,36 @@ def s2_load_flows(
     async def finish_diff(prepared: PreparedDiff, outcomes: list[LoadOutcome]) -> LoadDiffResult:
         return await service.finish_diff(prepared, outcomes)
 
+    async def load_objects(prepared: PreparedLoad) -> list[LoadOutcome]:
+        """Up to ``parallelism`` objects at a time.
+
+        After a failure no object starts, and the inserts in flight finish before it is raised.
+        """
+        slots = asyncio.Semaphore(parallelism)
+        failed = False
+
+        async def one(entry: ManifestEntry) -> LoadOutcome | None:
+            nonlocal failed
+            async with slots:
+                if failed:
+                    return None
+                try:
+                    return await load_object(prepared, entry)
+                except BaseException:
+                    failed = True
+                    raise
+
+        results = await asyncio.gather(
+            *(one(entry) for entry in prepared.manifest.entries), return_exceptions=True
+        )
+        if error := next((r for r in results if isinstance(r, BaseException)), None):
+            raise error
+        return [result for result in results if isinstance(result, LoadOutcome)]
+
     @flow(name="s2-load", persist_result=False)
     async def s2_load(command: LoadDataset) -> LoadDatasetResult:
         prepared = await prepare(command)
-        outcomes = [await load_object(prepared, entry) for entry in prepared.manifest.entries]
-        return await finish(prepared, outcomes)
+        return await finish(prepared, await load_objects(prepared))
 
     @flow(name="s2-load-diff", persist_result=False)
     async def s2_load_diff(command: LoadDiff) -> LoadDiffResult:

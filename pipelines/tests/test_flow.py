@@ -29,7 +29,7 @@ from openknowledge_core.ingestion.errors import (
     TableUnavailable,
 )
 from openknowledge_core.ingestion.families import ArchiveFamily, archive_family
-from openknowledge_core.ingestion.models import DatasetListing
+from openknowledge_core.ingestion.models import DatasetListing, LoadObject
 from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flows
 from openknowledge_pipelines.flows.s2_download import S2DownloadFlow, s2_download_flow
 from openknowledge_pipelines.flows.s2_load import S2LoadFlow, s2_load_flows
@@ -144,6 +144,59 @@ async def test_only_transient_load_errors_are_retried(
     with pytest.raises(ContractViolation):
         await load_flow(store, tables)(LOAD)
     assert tables.loads == ["part-0.gz", "part-0.gz"]
+
+
+class GatedTables(FakeTables):
+    """Loads that take a moment, counting how many run at once.
+
+    A listed part fails once ``wide`` loads are in flight, before any of them finishes.
+    """
+
+    def __init__(self, store: FakeStore, fail: set[str], wide: int) -> None:
+        super().__init__(store)
+        self.fail, self.wide = fail, wide
+        self.in_flight = self.max_in_flight = 0
+        self.started: list[str] = []
+        self.wide_open = asyncio.Event()
+
+    async def load(self, request: LoadObject) -> int:
+        name = request.object_ref.path.name.rsplit("/", 1)[-1]
+        self.started.append(name)
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        if self.in_flight >= self.wide:
+            self.wide_open.set()
+        try:
+            if self.fail:
+                await asyncio.wait_for(self.wide_open.wait(), 5)
+            if name in self.fail:
+                raise ContractViolation("bad record")
+            await asyncio.sleep(0.05)
+            return await super().load(request)
+        finally:
+            self.in_flight -= 1
+
+
+async def test_objects_load_at_most_parallelism_at_a_time_and_stop_after_a_failure(
+    service: DownloadDatasetService, source: FakeSource, store: FakeStore
+) -> None:
+    for index in range(2, 5):
+        source.add("papers", f"part-{index}.gz", PAPERS["part-0.gz"])
+    await build(service)(COMMAND)
+    tables, applied = GatedTables(store, fail={"part-1.gz"}, wide=3), FakeApplied()
+    loader = LoadDatasetService(
+        store=store, tables=tables, applied=applied, producer=PRODUCER, clock=clock
+    )
+    flow = s2_load_flows(loader, task_retries=0, retry_delay_seconds=0, parallelism=3).dataset
+    with pytest.raises(ContractViolation):
+        await flow(LOAD)
+    # part-0 and part-2 were in flight beside part-1 and finished; no later part started.
+    assert sorted(tables.started) == ["part-0.gz", "part-1.gz", "part-2.gz"]
+    assert (sorted(tables.loads), applied.records) == (["part-0.gz", "part-2.gz"], [])
+    tables.fail = set()
+    result = await flow(LOAD)
+    assert (result.loaded, result.already_loaded, tables.max_in_flight) == (3, 2, 3)
+    assert len(applied.records) == 1
 
 
 async def test_batch_rounds_run_only_unfinished_shards(
