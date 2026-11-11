@@ -235,18 +235,17 @@ async def openalex_load(command: OpenAlexLoad, wait: bool = False) -> OpenAlexLo
 @flow(name="openalex-release-check", persist_result=False, retries=0)
 async def openalex_release_check(prefix: str = "openalex") -> OpenAlexLoadResult | None:
     """Archive and load OpenAlex's release once it is new, into the bucket the loads read."""
-    bucket = LoadSettings().clickhouse_raw_bucket  # pyright: ignore[reportCallIssue]
+    load_settings = LoadSettings()  # pyright: ignore[reportCallIssue]
+    bucket = load_settings.clickhouse_raw_bucket
     settings = OpenAlexSettings()  # pyright: ignore[reportCallIssue]
 
     async def latest() -> ReleaseId:
         async with admission.execution(), bootstrap.open_openalex_service(settings) as service:
             return (await service.catalog.resolve_release("latest")).release_id
 
-    async def archived(release: ReleaseId) -> bool:
-        async with admission.execution(), bootstrap.open_openalex_service(settings) as service:
-            return await service.archived(
-                DownloadDataset(release=release, dataset="works", bucket=bucket, prefix=prefix)
-            )
+    async def loaded(release: ReleaseId) -> bool:
+        async with admission.execution(), bootstrap.open_held_releases(load_settings) as held:
+            return all([await held(name) == release for name in ("works", "works-abstracts")])
 
     async def take(release: ReleaseId) -> OpenAlexLoadResult:
         async with admission.execution(), bootstrap.open_openalex_service(settings) as service:
@@ -256,7 +255,7 @@ async def openalex_release_check(prefix: str = "openalex") -> OpenAlexLoadResult
             OpenAlexLoad(release=release, bucket=bucket, prefix=prefix), wait=True
         )
 
-    return await check_release(latest, archived, take)
+    return await check_release(latest, loaded, take)
 
 
 @flow(name="openalex-batch-download", persist_result=False)

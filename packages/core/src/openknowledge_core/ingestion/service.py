@@ -13,7 +13,6 @@ from pydantic import BaseModel, ValidationError
 from openknowledge_contracts.datasets import (
     DIFF_INVENTORY_NAME,
     INVENTORY_NAME,
-    MANIFEST_NAME,
     ArchiveDocument,
     DatasetInventory,
     DiffInventory,
@@ -145,13 +144,6 @@ class DownloadDatasetService:
             compare_with=SERVED_NOW,
         )
         return PinnedRelease(release_id=metadata.release_id, record=path)
-
-    async def archived(self, command: DownloadDataset) -> bool:
-        """Whether the dataset's manifest exists, which is written once every object is."""
-        path = dataset_file_path(
-            command.bucket, command.prefix, command.release, command.dataset, MANIFEST_NAME
-        )
-        return await self._store.stat(path) is not None
 
     async def pin_dataset(self, command: DownloadDataset) -> PinnedDataset:
         """A stored inventory wins over a fresh listing, which only has to name the same shards."""

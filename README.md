@@ -191,8 +191,9 @@ OpenAlex work, with `source` saying which. It takes the papers and abstracts dif
 earlier of their two releases; until abstracts holds a release, the group is skipped.
 The `openalex-load` deployment builds the read tables right after its load, and the search index
 follows each of its runs; a failed build leaves the load applied for the next sync to build from.
-`openalex-release-check` (Mondays 04:00 Europe/Zurich) archives and loads OpenAlex's release when
-its works are not archived yet, queueing behind a running S2 sync. Its schedule stays off until
+`openalex-release-check` (Mondays 04:00 Europe/Zurich) archives and loads OpenAlex's release until
+both OpenAlex tables hold it, resuming a failed archive or load, and queueing behind a running
+S2 sync. Its schedule stays off until
 `OKP_OPENALEX_CHECK_SCHEDULE_ENABLED=true`: each new release downloads about 800 GB and
 reindexes every paper.
 

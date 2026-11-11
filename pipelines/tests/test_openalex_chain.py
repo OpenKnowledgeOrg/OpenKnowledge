@@ -13,7 +13,7 @@ RELEASE = "2027-01-13"
 COMMAND = OpenAlexLoad(release=RELEASE, bucket="raw")
 
 
-async def test_a_new_release_is_loaded_then_built_and_an_archived_one_starts_nothing() -> None:
+async def test_a_new_release_is_loaded_then_built_and_a_loaded_one_starts_nothing() -> None:
     events: list[str] = []
 
     async def load(command: LoadDataset) -> LoadDatasetResult:
@@ -44,7 +44,7 @@ async def test_a_new_release_is_loaded_then_built_and_an_archived_one_starts_not
     async def latest() -> str:
         return RELEASE
 
-    async def archived(release: str) -> bool:
+    async def loaded(release: str) -> bool:
         return release in taken
 
     taken: list[str] = []
@@ -53,13 +53,13 @@ async def test_a_new_release_is_loaded_then_built_and_an_archived_one_starts_not
         taken.append(release)
         return await load_then_build(load, build, COMMAND)
 
-    first = await check_release(latest, archived, take)
+    first = await check_release(latest, loaded, take)
     assert events == [
         f"load {name} {RELEASE}" for name in ("sources", "works", "works-abstracts")
     ] + ["build"]
     assert first is not None and first.read_tables is not None
-    # The archived release starts nothing.
-    assert await check_release(latest, archived, take) is None and taken == [RELEASE]
+    # A loaded release starts nothing.
+    assert await check_release(latest, loaded, take) is None and taken == [RELEASE]
     # A failed build leaves the load's result standing, with the reason.
     rebuilt = await load_then_build(load, build, COMMAND)
     assert rebuilt.read_tables is None and rebuilt.read_tables_failure == "synthetic refusal"

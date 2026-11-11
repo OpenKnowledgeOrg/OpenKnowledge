@@ -57,16 +57,16 @@ async def load_then_build(
 
 async def check_release(
     latest: Callable[[], Awaitable[ReleaseId]],
-    archived: Callable[[ReleaseId], Awaitable[bool]],
+    loaded: Callable[[ReleaseId], Awaitable[bool]],
     take: Callable[[ReleaseId], Awaitable[OpenAlexLoadResult]],
 ) -> OpenAlexLoadResult | None:
-    """Take OpenAlex's release in when its works are not archived yet; else start nothing.
+    """Take OpenAlex's release in until both OpenAlex tables hold it; then start nothing.
 
-    OpenAlex serves only its latest release, so one that is not archived is newer than every
-    archived one.
+    Archive and load resume from their receipts, so a release whose archive or load failed is
+    taken up again, and only the missing objects are downloaded or loaded.
     """
     release = await latest()
-    if await archived(release):
-        log.info("OpenAlex release %s is archived already", release)
+    if await loaded(release):
+        log.info("OpenAlex release %s is loaded already", release)
         return None
     return await take(release)
