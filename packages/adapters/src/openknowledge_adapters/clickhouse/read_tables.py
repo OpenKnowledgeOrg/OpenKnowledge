@@ -606,6 +606,9 @@ class ClickHouseReadTables:
                 for table in reversed(swapped):
                     await self._client.post(f"EXCHANGE TABLES {table}_new AND {table}")
                 raise
+            # As in an update, a kept delta never outlives the markers of the build that used it.
+            for group in KEPT_DELTA.intersection(groups):
+                await self._client.post(f"DROP TABLE IF EXISTS {DELTA[group]}")
             markers = [
                 await self._marker(table, group_release(group, releases), None, producer, clock)
                 for group in groups
@@ -628,8 +631,6 @@ class ClickHouseReadTables:
             await self._applied.record_all(markers)
             for table in tables:
                 await self._client.post(f"DROP TABLE {table}_new SYNC")
-            for group in KEPT_DELTA.intersection(groups):
-                await self._client.post(f"DROP TABLE IF EXISTS {DELTA[group]}")
         return BuildReadTablesResult(
             source_releases=dict(releases),
             tables=results,
