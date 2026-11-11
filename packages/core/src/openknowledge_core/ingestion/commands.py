@@ -193,6 +193,23 @@ class ArchiveReleaseResult(BaseModel):
     datasets: tuple[BatchDownloadResult, ...]
 
 
+class OpenAlexLoad(BaseModel):
+    """Load one archived OpenAlex release into every OpenAlex table."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    release: ReleaseId
+    bucket: BucketName
+    prefix: ObjectPrefix = "openalex"
+
+
+class OpenAlexLoadResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    works: LoadDatasetResult
+    abstracts: LoadDatasetResult
+
+
 class BatchDiffDownloadResult(BaseModel):
     """``manifests`` has one per part with files; a part without files has none."""
 

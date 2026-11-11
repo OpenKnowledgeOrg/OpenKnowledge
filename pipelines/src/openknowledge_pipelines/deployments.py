@@ -30,6 +30,8 @@ from openknowledge_core.ingestion import (
     LoadDatasetResult,
     LoadDiff,
     LoadDiffResult,
+    OpenAlexLoad,
+    OpenAlexLoadResult,
     WatchdogResult,
 )
 from openknowledge_core.ingestion.coordinator import SyncResult
@@ -37,6 +39,7 @@ from openknowledge_core.ingestion.errors import DatasetNotInRelease, IngestionEr
 from openknowledge_core.ingestion.families import ArchiveFamily, require_family
 from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 from openknowledge_pipelines import admission, bootstrap
+from openknowledge_pipelines.flows.openalex_load import load_release
 from openknowledge_pipelines.flows.s2_sync import run_sync
 from openknowledge_pipelines.flows.sync_observability import SyncObservation
 from openknowledge_pipelines.settings import (
@@ -202,6 +205,21 @@ async def s2_batch_download_embeddings_diff(command: DownloadDiff) -> BatchDiffD
     return await _download_diff(command, ArchiveFamily.EMBEDDINGS)
 
 
+@flow(name="openalex-load", persist_result=False)
+async def openalex_load(command: OpenAlexLoad) -> OpenAlexLoadResult:
+    """Under the ClickHouse limit, so it never overlaps an S2 load or the read-table build."""
+    settings = LoadSettings()  # pyright: ignore[reportCallIssue]
+    async with (
+        one_clickhouse_loader(wait=False),
+        admission.execution(),
+        bootstrap.open_load_service(settings) as service,
+    ):
+        flows = bootstrap.load_flows(
+            service, settings, parallelism=settings.openalex_load_parallelism
+        )
+        return await load_release(flows.dataset.fn, command)
+
+
 @flow(name="openalex-batch-download", persist_result=False)
 async def openalex_batch_download(command: ArchiveRelease) -> ArchiveReleaseResult:
     """Archive one release, what the load reads first, under its own limit apart from S2's.
@@ -363,6 +381,12 @@ def serve() -> None:
         ),
         RunnerDeployment.from_flow(
             openalex_batch_download,
+            DEPLOYMENT,
+            entrypoint_type=EntrypointType.MODULE_PATH,
+            concurrency_limit=1,
+        ),
+        RunnerDeployment.from_flow(
+            openalex_load,
             DEPLOYMENT,
             entrypoint_type=EntrypointType.MODULE_PATH,
             concurrency_limit=1,

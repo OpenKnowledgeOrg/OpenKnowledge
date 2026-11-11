@@ -37,6 +37,7 @@ from openknowledge_core.ingestion import (
 )
 from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 from openknowledge_pipelines import admission, bootstrap, cli, deployments
+from openknowledge_pipelines.flows.s2_download import s2_download_flow
 from openknowledge_pipelines.settings import (
     LoadSettings,
     PipelineSettings,
@@ -224,11 +225,12 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_batch_download_embeddings,
         deployments.s2_batch_download_embeddings_diff,
         deployments.openalex_batch_download,
+        deployments.openalex_load,
         deployments.watchdog,
     ]
-    assert [found.concurrency_limit for found in served] == [1] * 11 + [None]
+    assert [found.concurrency_limit for found in served] == [1] * 12 + [None]
     _coordinator, *unscheduled, watchdog = served
-    assert [found.schedules for found in unscheduled] == [[]] * 10
+    assert [found.schedules for found in unscheduled] == [[]] * 11
     [scheduled] = cast("list[DeploymentScheduleCreate]", watchdog.schedules)
     assert isinstance(scheduled.schedule, CronSchedule)
     # from_flow stores no timezone for a cron, and the server reads None as UTC.
@@ -893,7 +895,7 @@ OA_TARGET = ["--bucket", "raw"]
 
 @pytest.mark.parametrize(
     "args",
-    [[], ["pin"], ["archive"], ["download-shard"]],
+    [[], ["pin"], ["archive"], ["load"], ["download-shard"]],
     ids=lambda args: " ".join(args) or "group",
 )
 def test_openalex_helps_work_with_an_empty_environment(
@@ -910,6 +912,34 @@ def test_openalex_pin_archives_the_manifest_under_openalex(store: FakeStore) -> 
     code, output = okp_oa("pin", "--release", OPENALEX_RELEASE, *OA_TARGET)
     assert code == 0, output
     assert json.loads(output)["record"]["name"] == f"openalex/{OPENALEX_RELEASE}/release.json"
+
+
+@pytest.mark.usefixtures("prefect_server")
+def test_openalex_load_fills_both_tables_without_an_s2_key(
+    monkeypatch: pytest.MonkeyPatch, oa_wired: DownloadDatasetService, store: FakeStore
+) -> None:
+    deployments.ensure_limits()
+    archive = s2_download_flow(oa_wired, task_retries=0, retry_delay_seconds=0)
+    works = DownloadDataset(
+        release=OPENALEX_RELEASE, dataset="works", bucket="raw", prefix="openalex"
+    )
+    asyncio.run(archive(works))
+    tables = FakeTables(store, archive={"works-abstracts": "works"})
+
+    @asynccontextmanager
+    async def open_load_service(settings: LoadSettings) -> AsyncGenerator[LoadDatasetService]:
+        yield LoadDatasetService(
+            store=store, tables=tables, applied=FakeApplied(), producer=PRODUCER, clock=clock
+        )
+
+    monkeypatch.setattr(bootstrap, "open_load_service", open_load_service)
+    for name, value in {**LOAD_ENV, "OKP_OPENALEX_LOAD_PARALLELISM": "2"}.items():
+        monkeypatch.setenv(name, value)
+    code, output = okp_oa("load", "--release", OPENALEX_RELEASE, *OA_TARGET)
+    assert code == 0, output
+    result = json.loads(output.splitlines()[-1])
+    assert (result["works"]["loaded"], result["abstracts"]["loaded"]) == (2, 2)
+    assert (result["works"]["live_rows"], result["abstracts"]["live_rows"]) == (14, 14)
 
 
 @pytest.mark.usefixtures("oa_wired")
