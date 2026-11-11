@@ -147,12 +147,15 @@ def delta_sql(group: str, start: ReleaseId, end: ReleaseId, max_keys: int) -> li
         f"SELECT {KEY[group]} AS key FROM {source} WHERE {window}"
         for source in GROUP_SOURCES[group]
     )
+    # A paper first added as another's peer is added again once its own sources change.
     return [
-        f"CREATE TABLE IF NOT EXISTS {delta} (key UInt64) ENGINE = MergeTree ORDER BY key",
-        f"INSERT INTO {delta} SELECT DISTINCT key FROM ({sources}) "
-        f"WHERE key NOT IN (SELECT key FROM {delta}) "
+        f"CREATE TABLE IF NOT EXISTS {delta} (key UInt64, expanded Bool) "
+        "ENGINE = MergeTree ORDER BY key",
+        f"INSERT INTO {delta} (key, expanded) SELECT DISTINCT key, false FROM ({sources}) "
+        f"WHERE key NOT IN (SELECT key FROM {delta} WHERE NOT expanded) "
         f"LIMIT {max_keys + 1} {MEMORY}, max_threads = 1",
-        f"INSERT INTO {delta} {expansion_sql(delta)} {MEMORY}, {SPILL}",
+        f"INSERT INTO {delta} (key, expanded) SELECT corpusid, true FROM ({expansion_sql(delta)}) "
+        f"{MEMORY}, {SPILL}",
     ]
 
 
@@ -162,20 +165,25 @@ def apply_sql(group: str) -> list[str]:
     Deleting every delta key first makes a rerun after a partial run reach the same state.
     """
     keys = f"SELECT key FROM {DELTA[group]}"
-    touched = f"{KEY[group]} IN ({keys})"
+    # A best abstract depends on the paper's own chosen work only, so papers that merely shared
+    # a work keep their row: no later search diff would rewrite it.
+    own = {BEST: f"{keys} WHERE NOT expanded"}
     tables = GROUPS[group]
+    touched = {table: f"{KEY[group]} IN ({own.get(table, keys)})" for table in tables}
     # Waited on: until a delete finishes, the old rows still show next to the new ones.
     deletes = [
-        f"DELETE FROM {table} WHERE {touched} SETTINGS lightweight_deletes_sync = 2"
+        f"DELETE FROM {table} WHERE {touched[table]} SETTINGS lightweight_deletes_sync = 2"
         for table in tables
     ]
     # The incoming edges and the abstracts follow tables this run updates first.
     special = {
-        IN: f"{EDGES_IN} WHERE {touched}",
+        IN: f"{EDGES_IN} WHERE {KEY[group]} IN ({keys})",
         XWALK: xwalk_select(keys),
-        BEST: best_select(XWALK, keys),
+        BEST: best_select(XWALK, own[BEST]),
     }
-    selects = {table: special.get(table, f"{SOURCES[table]} AND {touched}") for table in tables}
+    selects = {
+        table: special.get(table, f"{SOURCES[table]} AND {touched[table]}") for table in tables
+    }
     return deletes + [
         f"INSERT INTO {table} ({COLUMNS[table]}) {selects[table]} {SETTINGS}{BLOCKS[table]}"
         for table in tables
