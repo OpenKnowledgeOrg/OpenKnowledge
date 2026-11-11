@@ -2,7 +2,12 @@ from uuid import UUID
 
 import pytest
 
-from openknowledge_contracts.manifests import ObjectPath
+from openknowledge_contracts.manifests import (
+    DatasetManifest,
+    ManifestEntry,
+    ObjectPath,
+    ObjectRef,
+)
 from openknowledge_contracts.tables.contract import UpdateMode
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
@@ -313,3 +318,32 @@ async def test_conflicting_keys_in_the_update_files_fail_the_diff(
         await load_diff(store, tables, applied)
     assert tables.loads == ["part-0.gz", "part-1.gz"]
     assert [found.release for found in applied.records] == [RELEASE]
+
+
+async def test_a_contract_reads_the_manifest_of_its_archived_dataset(store: FakeStore) -> None:
+    object_path = ObjectPath.under("raw", "openalex", RELEASE, "works", "part-0.parquet")
+    data = b"rows"
+    entry = ManifestEntry(
+        object_ref=ObjectRef(path=object_path, generation=store.put(object_path, data)),
+        size=len(data),
+        sha256="0" * 64,
+        md5="AAAAAAAAAAAAAAAAAAAAAA==",
+        crc32c="AAAAAA==",
+        records=1,
+    )
+    manifest = DatasetManifest(
+        schema_version=1,
+        release_id=RELEASE,
+        dataset="works",
+        entries=(entry,),
+        producer=PRODUCER,
+        completed_at=clock(),
+    )
+    path = ObjectPath.under("raw", "openalex", RELEASE, "works", "manifest.json")
+    store.put(path, manifest.to_json())
+    service = loader(store, FakeTables(store, archive={"works-abstracts": "works"}), FakeApplied())
+    prepared = await service.prepare(
+        LoadDataset(release=RELEASE, dataset="works-abstracts", bucket="raw", prefix="openalex")
+    )
+    assert prepared.manifest_path == path
+    assert prepared.manifest == manifest

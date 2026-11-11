@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_contracts.datasets import DatasetName
-from openknowledge_contracts.tables.s2 import CONTRACTS
+from openknowledge_contracts.sources import contract_for
 from openknowledge_core.ingestion.errors import IngestionError, TableAccessDenied
 from openknowledge_core.ingestion.measurement import LoadSnapshot
 
@@ -15,7 +15,7 @@ class ClickHouseLoadTelemetry:
 
     async def snapshot(self, dataset: DatasetName) -> LoadSnapshot:
         snapshot = LoadSnapshot(captured_at=datetime.now(UTC))
-        table = CONTRACTS[dataset].table
+        table = contract_for(dataset)[1].table
         # Independent queries retain partial evidence when a system table is unavailable.
         for system_table, fields, query in (
             (

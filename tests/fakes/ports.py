@@ -332,8 +332,9 @@ class FakeStore:
 class FakeTables:
     """ClickHouse as the loader sees it, counting rows per object."""
 
-    def __init__(self, store: FakeStore) -> None:
+    def __init__(self, store: FakeStore, archive: dict[str, str] | None = None) -> None:
         self.store = store
+        self.archive = archive or {}
         self.uuid = UUID(int=1)
         self.updates: UpdateMode = "diffs"
         self.rows: dict[str, int] = {}
@@ -351,6 +352,7 @@ class FakeTables:
     async def table(self, dataset: str) -> TableState:
         return TableState(
             name=dataset,
+            archive=self.archive.get(dataset, dataset),
             uuid=self.uuid,
             has_rows=bool(self.rows),
             load_sql_sha256="0" * 64,

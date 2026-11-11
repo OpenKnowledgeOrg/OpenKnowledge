@@ -235,6 +235,7 @@ class TableState(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
+    archive: DatasetName
     uuid: UUID
     has_rows: bool
     load_sql_sha256: Sha256Hex

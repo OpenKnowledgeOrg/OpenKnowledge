@@ -90,9 +90,9 @@ class LoadDatasetService:
                 "a different base needs an empty or new table"
             )
         path = dataset_file_path(
-            command.bucket, command.prefix, command.release, command.dataset, MANIFEST_NAME
+            command.bucket, command.prefix, command.release, table.archive, MANIFEST_NAME
         )
-        manifest = await self._manifest(path, command.release, command.dataset, BASE_HINT)
+        manifest = await self._manifest(path, command.release, table.archive, BASE_HINT)
         prepared = PreparedLoad(manifest_path=path, manifest=manifest, table=table)
         if self._observer is not None:
             await self._observer.planned(prepared)
