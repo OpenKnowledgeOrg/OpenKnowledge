@@ -731,9 +731,13 @@ def test_search_joins_current_text_and_tldr_only_changes(tmp_path: Path) -> None
     VALUES (1, ('Nature', '1-9', 'IV'), '2026-10-06', 'test', 0);
     INSERT INTO papers (corpusid, source_release, source_object, is_deleted)
     VALUES (2, '2026-10-06', 'test', 0),
-           (3, '2026-10-06', 'test', 0), (5, '2026-10-06', 'test', 1);
+           (3, '2026-10-06', 'test', 0), (5, '2026-10-06', 'test', 1),
+           (6, '2026-10-06', 'test', 0);
     INSERT INTO abstracts (corpusid, abstract, source_release, source_object, is_deleted)
-    VALUES (1, 'abstract', '2026-10-13', 'test', 0);
+    VALUES (1, 'abstract', '2026-10-13', 'test', 0), (3, '', '2026-10-20', 'test', 1);
+    INSERT INTO paper_abstract_best (corpusid, abstract, source, work_id)
+    VALUES (1, 'abstract', 's2', NULL), (3, 'OA three', 'openalex', 30),
+           (6, 'not touched', 'openalex', 60);
     INSERT INTO tldrs (corpusid, text, source_release, source_object, is_deleted)
     VALUES (1, 'old', '2026-10-06', 'test', 0),
            (1, 'summary', '2026-10-20', 'test', 0),
@@ -743,7 +747,7 @@ def test_search_joins_current_text_and_tldr_only_changes(tmp_path: Path) -> None
            (5, 'deleted paper', '2026-10-20', 'test', 0);
     """
     )
-    parameters = dict(low="1", high="5", release="2026-10-20", from_release="2026-10-13")
+    parameters = dict(low="1", high="6", release="2026-10-20", from_release="2026-10-13")
     base = clickhouse_local(
         setup + BASE_QUERY.replace("SETTINGS", "FORMAT JSONEachRow SETTINGS"),
         tmp_path / "base",
@@ -754,10 +758,11 @@ def test_search_joins_current_text_and_tldr_only_changes(tmp_path: Path) -> None
         tmp_path / "diff",
         **parameters,
     )
-    assert {row["corpusid"] for row in base} == {1, 2, 3}
-    assert {row["corpusid"] for row in diff} == {1, 2, 4, 5}
+    assert {row["corpusid"] for row in base} == {1, 2, 3, 6}
+    # 6 changed in no S2 table after 10-13, so the diff leaves it alone.
+    assert {row["corpusid"] for row in diff} == {1, 2, 3, 4, 5}
     for rows in (base, diff):
-        operations = {row["corpusid"]: document_operation(source_rows(row), 2) for row in rows}
+        operations = {row["corpusid"]: document_operation(source_rows(row), 3) for row in rows}
         live, gone = operations[1], operations[2]
         assert isinstance(live, IndexDocument) and isinstance(gone, IndexDocument)
         assert live.document.tldr == "summary"
@@ -769,6 +774,11 @@ def test_search_joins_current_text_and_tldr_only_changes(tmp_path: Path) -> None
         }
         assert gone.document.tldr is None
         assert live.version == 41492 and gone.version == 41493
+        assert (live.document.abstract, live.document.abstract_source) == ("abstract", "s2")
+        three = operations[3]
+        assert isinstance(three, IndexDocument)
+        assert (three.document.abstract, three.document.abstract_source) == ("OA three", "openalex")
+        assert three.version == 41493  # the S2 tombstone's 2026-10-20 * 2 + 1
     assert operations[4] is None
     assert operations[5] is not None and operations[5].version == 41492
 
