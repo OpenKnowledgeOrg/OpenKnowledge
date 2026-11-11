@@ -31,7 +31,13 @@ type Catalog = dict[str, list[dict[str, Any]]]
 # Tables that hold no dataset: which objects were loaded into which table, and which release each
 # table holds.
 BOOKKEEPING = {"loads", "applied", "indexed"}
-DERIVED = {"papers_slim", "citation_edges_out", "citation_edges_in", "paper_xwalk"}
+DERIVED = {
+    "papers_slim",
+    "citation_edges_out",
+    "citation_edges_in",
+    "paper_xwalk",
+    "paper_abstract_best",
+}
 
 
 def test_every_migration_is_a_numbered_goose_file_with_up_and_down() -> None:

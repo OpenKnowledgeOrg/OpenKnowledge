@@ -8,7 +8,12 @@ from typing import Any
 
 import pytest
 
-from openknowledge_adapters.clickhouse.crosswalk import XWALK_COLUMNS, xwalk_select
+from openknowledge_adapters.clickhouse.crosswalk import (
+    BEST_COLUMNS,
+    XWALK_COLUMNS,
+    best_select,
+    xwalk_select,
+)
 from openknowledge_adapters.clickhouse.read_tables import (
     COLUMNS,
     DELTA,
@@ -276,4 +281,36 @@ def test_xwalk_incremental_equals_full_rebuild(tmp_path: Path) -> None:
         (2, 10, True),
         (3, 30, False),
         (5, 40, False),
+    ]
+
+
+@needs_clickhouse
+def test_best_abstract_prefers_live_s2_then_the_chosen_work(tmp_path: Path) -> None:
+    sql = f"""
+        {up()}
+        SYSTEM STOP MERGES abstracts;
+        INSERT INTO papers (corpusid, source_release, is_deleted)
+        VALUES (1, '2026-10-01', 0), (2, '2026-10-01', 0), (3, '2026-10-01', 0),
+               (4, '2026-10-01', 0), (5, '2026-10-01', 0), (6, '2026-10-01', 1);
+        INSERT INTO abstracts (corpusid, abstract, source_release, is_deleted)
+        VALUES (1, 'S2 one', '2026-10-01', 0), (3, 'S2 three', '2026-10-01', 0),
+               (6, 'S2 six', '2026-10-01', 0);
+        INSERT INTO abstracts (corpusid, abstract, source_release, is_deleted)
+        VALUES (3, '', '2026-10-02', 1);
+        INSERT INTO paper_xwalk (corpusid, work_id, match_key, rank, chosen, shared_work)
+        VALUES (1, 10, 'doi', 1, 1, 0), (2, 20, 'doi', 1, 1, 0), (2, 21, 'pmid', 2, 0, 0),
+               (3, 30, 'doi', 1, 1, 0), (4, 40, 'doi', 1, 1, 0), (5, 50, 'doi', 1, 1, 0);
+        INSERT INTO openalex_abstracts (work_id, abstract, removed, source_release, is_deleted)
+        VALUES (10, 'OA one', 0, '2026-10-01', 0), (20, 'OA two', 0, '2026-10-01', 0),
+               (21, 'OA wrong', 0, '2026-10-01', 0), (30, 'OA three', 0, '2026-10-01', 0),
+               (40, '', 0, '2026-10-01', 0), (50, 'OA five', 1, '2026-10-01', 0);
+        CREATE TABLE paper_abstract_best_new AS paper_abstract_best;
+        INSERT INTO paper_abstract_best_new ({BEST_COLUMNS}) {best_select("paper_xwalk", None)};
+        SELECT * FROM paper_abstract_best_new ORDER BY corpusid FORMAT JSONEachRow;
+    """
+    # Plan A writes a row for every work, so an empty OpenAlex abstract must not win (40).
+    assert clickhouse_local(sql, tmp_path) == [
+        {"corpusid": 1, "abstract": "S2 one", "source": "s2", "work_id": None},
+        {"corpusid": 2, "abstract": "OA two", "source": "openalex", "work_id": 20},
+        {"corpusid": 3, "abstract": "OA three", "source": "openalex", "work_id": 30},
     ]

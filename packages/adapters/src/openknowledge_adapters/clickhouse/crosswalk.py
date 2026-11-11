@@ -125,3 +125,32 @@ def expansion_sql(delta: str) -> str:
         f"SELECT work_id FROM paper_xwalk WHERE chosen AND corpusid IN ({keys}) "
         f"UNION DISTINCT SELECT work_id FROM ({ranked_sql(keys)}) WHERE rank = 1)"
     )
+
+
+SOURCE = "Enum8('s2' = 1, 'openalex' = 2)"
+BEST_COLUMNS = "corpusid, abstract, source, work_id"
+
+
+def best_select(xwalk: str, keys: str | None) -> str:
+    """One abstract per live paper in ``keys``, or per live paper without ``keys``.
+
+    It is the live S2 abstract, even an empty one, else the non-empty abstract of the paper's
+    chosen work in ``xwalk``. The large sides are joined rather than tested with IN, whose sets
+    cannot spill to disk: the live papers alone would take about 6.5 GB.
+    """
+    within = f" AND corpusid IN ({keys})" if keys else ""
+    works = f" AND work_id IN (SELECT work_id FROM {xwalk} WHERE chosen{within})" if keys else ""
+    live_s2 = f"SELECT corpusid, abstract FROM abstracts FINAL WHERE is_deleted = 0{within}"
+    return (
+        "SELECT a.corpusid AS corpusid, a.abstract AS abstract, "
+        f"CAST(1 AS {SOURCE}) AS source, CAST(NULL AS Nullable(UInt64)) AS work_id "
+        f"FROM ({live_s2}) AS a INNER JOIN ("
+        f"SELECT corpusid FROM papers FINAL WHERE is_deleted = 0{within}"
+        ") AS p ON p.corpusid = a.corpusid "
+        f"UNION ALL SELECT x.corpusid, o.abstract, CAST(2 AS {SOURCE}), x.work_id "
+        "FROM (SELECT work_id, abstract FROM openalex_abstracts FINAL "
+        f"WHERE is_deleted = 0 AND NOT removed AND abstract != ''{works}) AS o "
+        f"INNER JOIN (SELECT corpusid, work_id FROM {xwalk} WHERE chosen{within}) AS x "
+        "ON o.work_id = x.work_id "
+        f"LEFT ANTI JOIN ({live_s2}) AS s ON s.corpusid = x.corpusid"
+    )
