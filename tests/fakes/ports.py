@@ -348,10 +348,12 @@ class FakeTables:
         self.scanned: list[str] = []
         self.flagged = 0
         self.marked: list[str] = []
+        self.keys: set[str] = set()
 
     async def table(self, dataset: str) -> TableState:
         return TableState(
             name=dataset,
+            dataset=dataset,
             archive=self.archive.get(dataset, dataset),
             uuid=self.uuid,
             has_rows=bool(self.rows),
@@ -361,9 +363,11 @@ class FakeTables:
         )
 
     async def loaded(self, dataset: str, source_object: ObjectPath) -> LoadRecord | None:
+        self.keys.add(dataset)
         return self.records.get(str(source_object))
 
     async def load(self, request: LoadObject) -> int:
+        self.keys.add(request.dataset)
         path = request.object_ref.path
         self.loads.append(path.name.rsplit("/", 1)[-1])
         self.operations.append(request.operation)
@@ -377,9 +381,11 @@ class FakeTables:
         self.records[record.source_object] = record
 
     async def live_rows(self, dataset: str, release: str) -> int:
+        self.keys.add(dataset)
         return sum(self.rows.values()) - self.collapsed
 
     async def duplicates(self, dataset: str, objects: Sequence[ObjectPath]) -> Duplicates:
+        self.keys.add(dataset)
         self.scanned = [path.name.rsplit("/", 1)[-1] for path in objects]
         return self.found
 

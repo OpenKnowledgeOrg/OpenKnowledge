@@ -235,6 +235,7 @@ class TableState(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
+    dataset: DatasetName
     archive: DatasetName
     uuid: UUID
     has_rows: bool

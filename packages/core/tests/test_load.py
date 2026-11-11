@@ -322,7 +322,7 @@ async def test_conflicting_keys_in_the_update_files_fail_the_diff(
 
 async def test_a_contract_reads_the_manifest_of_its_archived_dataset(store: FakeStore) -> None:
     object_path = ObjectPath.under("raw", "openalex", RELEASE, "works", "part-0.parquet")
-    data = b"rows"
+    data = gz(b'{"id": 1}\n')
     entry = ManifestEntry(
         object_ref=ObjectRef(path=object_path, generation=store.put(object_path, data)),
         size=len(data),
@@ -341,9 +341,14 @@ async def test_a_contract_reads_the_manifest_of_its_archived_dataset(store: Fake
     )
     path = ObjectPath.under("raw", "openalex", RELEASE, "works", "manifest.json")
     store.put(path, manifest.to_json())
-    service = loader(store, FakeTables(store, archive={"works-abstracts": "works"}), FakeApplied())
+    tables = FakeTables(store, archive={"works-abstracts": "works"})
+    service = loader(store, tables, FakeApplied())
     prepared = await service.prepare(
         LoadDataset(release=RELEASE, dataset="works-abstracts", bucket="raw", prefix="openalex")
     )
     assert prepared.manifest_path == path
     assert prepared.manifest == manifest
+    outcomes = [await service.load_object(prepared, e) for e in prepared.manifest.entries]
+    result = await service.finish(prepared, outcomes)
+    assert result.dataset == "works-abstracts"
+    assert tables.keys == {"works-abstracts"}

@@ -63,6 +63,7 @@ class ClickHouseTables:
                 )
         return TableState(
             name=contract.table,
+            dataset=contract.name,
             archive=contract.archived,
             uuid=rows[0]["uuid"],
             has_rows=bool(rows[0]["total_rows"]),
