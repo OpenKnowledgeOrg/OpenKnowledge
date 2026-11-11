@@ -26,7 +26,6 @@ from openknowledge_core.ingestion.read_tables import (
     QUARTERLY,
     READ_TABLES,
     REBUILT_TOGETHER,
-    SOURCE_OF,
     BuildReadTablesResult,
     GroupPlan,
     GroupState,
@@ -109,6 +108,8 @@ SHARE_OF = {"openalex": PAPERS}
 """The table a group's touched keys are measured against, one row per key, when its own tables
 are not: ``paper_xwalk`` is empty until OpenAlex is loaded."""
 S2_SOURCES = ("papers", "citations")
+OPTIONAL = ("abstracts",)
+"""Sources that may hold no release yet; the groups they feed are skipped until they do."""
 OPENALEX = {"openalex_works": "works", "openalex_abstracts": "works-abstracts"}
 """The OpenAlex tables by the dataset that loads them."""
 KEPT_DELTA: frozenset[str] = frozenset({"openalex"})
@@ -216,13 +217,16 @@ class ClickHouseReadTables:
     async def is_current(self, releases: Mapping[str, ReleaseId]) -> bool:
         """Whether a build would change nothing; a group it would skip is not checked."""
         live = await self._live()
+        releases = {**releases, **await self._optional()}
         openalex = await self._openalex()
-        for group in await self._groups(openalex):
+        for group in await self._groups(releases, openalex):
+            sources = GROUP_SOURCES[group]
+            expected = group_release(group, releases) if releases.keys() >= {*sources} else None
             for table in GROUPS[group]:
                 applied = await self._applied.latest(table)
                 if (
                     applied is None
-                    or applied.release != releases.get(SOURCE_OF[table])
+                    or applied.release != expected
                     or live.get(table) != applied.target_uuid
                 ):
                     return False
@@ -261,11 +265,13 @@ class ClickHouseReadTables:
                     "finish its load before building read tables"
                 )
             releases[name], uuids[name] = release, source.uuid
+        optional = await self._optional(uuids)
+        releases |= optional
         openalex = await self._openalex()
         held = {table: held_release(*found) for table, found in openalex.items()}
         if (release := held["openalex_works"]) is not None:
             releases["openalex_works"] = release
-        groups = await self._groups(openalex)
+        groups = await self._groups(releases, openalex)
         plans: dict[str, GroupPlan] = {}
         if not full:
             async with self._stage("read tables: recovery and plan"):
@@ -322,10 +328,34 @@ class ClickHouseReadTables:
         )
 
     async def _groups(
-        self, openalex: Mapping[str, tuple[TableState, AppliedRelease | None]]
+        self,
+        releases: Mapping[str, ReleaseId],
+        openalex: Mapping[str, tuple[TableState, AppliedRelease | None]],
     ) -> list[str]:
-        """The groups a build brings current: a quarterly group waits for a settled load."""
-        return [name for name in GROUPS if name not in QUARTERLY or await self._settled(openalex)]
+        """The groups a build brings current.
+
+        A group waits for its optional sources to hold a release, and a quarterly group for a
+        settled load.
+        """
+        groups: list[str] = []
+        for name in GROUPS:
+            if missing := {*GROUP_SOURCES[name]} & {*OPTIONAL} - releases.keys():
+                log.warning("%s holds no completed release; skipping %s", ", ".join(missing), name)
+            elif name not in QUARTERLY or await self._settled(openalex):
+                groups.append(name)
+        return groups
+
+    async def _optional(self, uuids: dict[str, UUID] | None = None) -> dict[str, ReleaseId]:
+        """The releases of the optional sources that hold one, adding their UUIDs to ``uuids``."""
+        found: dict[str, ReleaseId] = {}
+        for name in OPTIONAL:
+            source = await self._tables.table(name)
+            release = held_release(source, await self._applied.latest(name))
+            if release is not None:
+                found[name] = release
+                if uuids is not None:
+                    uuids[name] = source.uuid
+        return found
 
     async def _openalex(self) -> dict[str, tuple[TableState, AppliedRelease | None]]:
         found: dict[str, tuple[TableState, AppliedRelease | None]] = {}
@@ -653,7 +683,8 @@ class ClickHouseReadTables:
     async def _preflight(self, groups: tuple[str, ...]) -> dict[str, int]:
         """Check the read tables of ``groups`` and capacity; return their live row counts."""
         tables = tuple(table for group in groups for table in GROUPS[group])
-        names = ", ".join(f"'{name}'" for name in ("papers", "citations", *tables))
+        sources = ("papers", "citations", "abstracts", "openalex_abstracts")
+        names = ", ".join(f"'{name}'" for name in (*sources, *tables))
         rows = await self._client.rows(
             "SELECT name, total_rows FROM system.tables WHERE database = currentDatabase() "
             f"AND name IN ({names})"
@@ -664,12 +695,20 @@ class ClickHouseReadTables:
         if "citations" in groups:
             await self._require_ids()
         per_row = {
-            "papers": ("papers", BYTES_PER_PAPER),
-            "citations": ("citations", BYTES_PER_CITATION),
-            "openalex": ("papers", BYTES_PER_XWALK),
+            "papers": {"papers": BYTES_PER_PAPER},
+            "citations": {"citations": BYTES_PER_CITATION},
+            "openalex": {
+                "papers": BYTES_PER_XWALK,
+                "abstracts": BYTES_PER_ABSTRACT,
+                "openalex_abstracts": BYTES_PER_ABSTRACT,
+            },
         }
         await self._require_free(
-            sum(found[per_row[group][0]] * per_row[group][1] for group in groups),
+            sum(
+                found.get(source, 0) * size
+                for group in groups
+                for source, size in per_row[group].items()
+            ),
             "building read tables",
         )
         return await self._counts(*tables)
