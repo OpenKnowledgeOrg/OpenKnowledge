@@ -9,6 +9,7 @@ from typing import Literal
 
 from openknowledge_contracts.datasets import DatasetName
 from openknowledge_contracts.tables.contract import DatasetContract
+from openknowledge_contracts.tables.openalex import CONTRACTS as OPENALEX_CONTRACTS
 from openknowledge_contracts.tables.s2 import CONTRACTS as S2_CONTRACTS
 
 type SourceName = Literal["semantic-scholar", "openalex"]
@@ -80,7 +81,7 @@ SOURCES: Mapping[SourceName, Source] = MappingProxyType(
                 {name: ArchivedDataset("parquet", folders=1) for name in _OPENALEX_ENTITIES}
                 | {"works-deleted": ArchivedDataset("jsonl-gz")}
             ),
-            contracts=MappingProxyType({}),
+            contracts=OPENALEX_CONTRACTS,
         ),
     }
 )
