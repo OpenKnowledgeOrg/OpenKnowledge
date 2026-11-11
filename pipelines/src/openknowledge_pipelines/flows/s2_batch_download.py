@@ -153,6 +153,7 @@ def s2_batch_download_flows(
             if not shards:
                 break
             job = ShardJob(
+                source="semantic-scholar",
                 release_id=pinned.release_id,
                 dataset=pinned.dataset,
                 bucket=pinned.bucket,

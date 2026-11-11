@@ -38,7 +38,7 @@ _FAMILIES: Mapping[SourceName, Mapping[str, ArchiveFamily]] = MappingProxyType(
 )
 
 
-def archive_family(dataset: str, source: SourceName = "semantic-scholar") -> ArchiveFamily:
+def archive_family(dataset: str, source: SourceName) -> ArchiveFamily:
     """A dataset name is unique only within its source, so the source decides."""
     try:
         return _FAMILIES[source][dataset]

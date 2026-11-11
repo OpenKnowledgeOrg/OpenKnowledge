@@ -136,7 +136,7 @@ def download(release: str, dataset: str, bucket: str, prefix: str) -> None:
 
 def _archive(command: DownloadDataset | DownloadDiff) -> None:
     try:
-        family = archive_family(command.dataset)
+        family = archive_family(command.dataset, "semantic-scholar")
     except ValueError as exc:
         raise click.UsageError(str(exc)) from None
     from openknowledge_pipelines import deployments
@@ -263,7 +263,7 @@ def adopt_archive_base(dataset: str, release: str, bucket: str, prefix: str) -> 
         bucket=bucket,
         prefix=prefix,
     )
-    if archive_family(dataset) == ArchiveFamily.CORE:
+    if archive_family(dataset, "semantic-scholar") == ArchiveFamily.CORE:
         raise click.UsageError("core progress uses applied releases")
     settings = _settings(PipelineSettings)
 

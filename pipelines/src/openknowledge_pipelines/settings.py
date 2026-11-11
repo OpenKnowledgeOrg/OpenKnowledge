@@ -94,7 +94,10 @@ class SearchSettings(LoadSettings):
 
 
 class BatchJobSettings(CommonSettings):
-    """What every source needs to run its downloads as Batch jobs."""
+    """What every source needs to run its downloads as Batch jobs.
+
+    List it first among the bases: a later base would reset the required digest to optional.
+    """
 
     image_digest: ImageDigest  # pyright: ignore[reportIncompatibleVariableOverride, reportGeneralTypeIssues]
     """Batch tasks run the image at this digest."""
@@ -112,14 +115,14 @@ class BatchJobSettings(CommonSettings):
     batch_wait_timeout_seconds: PositiveFloat = 24 * 60 * 60
 
 
-class BatchSettings(PipelineSettings, BatchJobSettings):
+class BatchSettings(BatchJobSettings, PipelineSettings):  # pyright: ignore[reportIncompatibleVariableOverride]
     sync: SyncCommand | None = None
 
     batch_s2_key_secret: str
     """The Secret Manager version Batch puts in each task's S2_API_KEY."""
 
 
-class OpenAlexBatchSettings(OpenAlexSettings, BatchJobSettings):
+class OpenAlexBatchSettings(BatchJobSettings, OpenAlexSettings):  # pyright: ignore[reportIncompatibleVariableOverride]
     batch_openalex_parallelism: PositiveInt = 8
     """Tasks at once, bounded by the region's external-IP and Spot CPU quotas."""
 

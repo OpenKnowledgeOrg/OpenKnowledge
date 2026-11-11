@@ -229,7 +229,7 @@ async def test_archive_families_resume_base_and_both_diff_parts(
     for name, data in PAPERS.items():
         source.add(dataset, name, data)
     source.add_diff(dataset, RELEASE, NEXT, dict(PAPERS), dict(PAPERS))
-    family = archive_family(dataset)
+    family = archive_family(dataset, "semantic-scholar")
     jobs = FakeJobs(service, failing={1})
     flows = s2_batch_download_flows(
         service, jobs, family=family, rounds=1, task_retries=0, retry_delay_seconds=0
@@ -263,7 +263,7 @@ async def test_missing_diff_does_not_create_manifest_or_submit_jobs(
     flows = s2_batch_download_flows(
         service,
         jobs,
-        family=archive_family(dataset),
+        family=archive_family(dataset, "semantic-scholar"),
         rounds=1,
         task_retries=0,
         retry_delay_seconds=0,
