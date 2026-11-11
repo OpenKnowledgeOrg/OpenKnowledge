@@ -224,9 +224,10 @@ limits. Manual `okp search index` runs use the same deployment queue and need on
 shared Prefect connection locally; search credentials and settings belong to the OpenSearch VM.
 On first installation the gate requires operator admission, as described above.
 
-Readers query the `papers` alias. When `papers`, `abstracts` and `tldrs` are applied at one
-release with matching live table UUIDs, the flow reads their latest rows into one document
-per paper. If they are not aligned, it logs why and finishes without writes. Rows can be
+Readers query the `papers` alias. When `papers`, `abstracts`, `tldrs` and the read table
+`paper_abstract_best` are applied at one release with matching live table UUIDs, and
+`paper_abstract_best` was built from the loaded OpenAlex release (if any), the flow reads their
+latest rows into one document per paper. If they are not aligned, it logs why and finishes without writes. Rows can be
 newer than the pass's release: replacing merges discard older versions, so the indexer
 always reads the latest state. The release bounds the key range and the diff's lower edge;
 new IDs above the frozen range are picked up by the next diff. A contract
@@ -236,6 +237,14 @@ refresh to its default, refreshes, and atomically switches the alias. Old indexe
 Otherwise it updates the live index by ID for IDs touched after its recorded release,
 covering missed releases in one pass, then refreshes and records the applied release.
 A current run repairs the alias if needed and does no document writes.
+
+Contract v3 takes `abstract` from `paper_abstract_best`: Semantic Scholar's abstract when it has
+a live one, else that of the paper's chosen OpenAlex work, and `abstract_source` (`s2` or
+`openalex`) says which. Each new OpenAlex release builds a new physical index, since the release
+is part of the name's fingerprint, and a pass whose OpenAlex release changes before it completes
+is refused. Every document of an index built from OpenAlex release D carries at least version
+`D * 2`, so a document never falls below a version it had. The DevTool must accept contract v3
+before the alias moves to a v3 index.
 
 `title`, `abstract` and `tldr` go through OpenSearch's `english` analyzer, which stems, so a match on `networks` finds `network`.
 `publicationdate` is a `date` in `yyyy-MM-dd` that takes range queries and sorts, and a value in another shape leaves the field unindexed but keeps the document.

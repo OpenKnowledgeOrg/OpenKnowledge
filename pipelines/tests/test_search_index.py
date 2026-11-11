@@ -36,7 +36,9 @@ class Progress:
 
     async def state(self) -> SearchState:
         return SearchState(
-            releases=dict.fromkeys(("papers", "abstracts", "tldrs"), "2026-10-06"),
+            releases=dict.fromkeys(
+                ("papers", "abstracts", "tldrs", "paper_abstract_best"), "2026-10-06"
+            ),
             sources={
                 name: UUID(int=i) for i, name in enumerate(("papers", "abstracts", "tldrs"), 1)
             },
@@ -101,6 +103,50 @@ async def test_failed_part_resumes_and_alias_switch_follows_settle(changed_sourc
     assert sink.refreshed == [result.index] and sink.target == result.index
     before = list(sink.requests)
     assert (await run()).outcome == "current" and sink.requests == before
+
+
+@pytest.mark.usefixtures("prefect_server")
+async def test_a_changed_openalex_release_refuses_completion() -> None:
+    class MovingProgress(Progress):
+        async def state(self) -> SearchState:
+            state = await super().state()
+            # A new OpenAlex release is applied and built while the parts run.
+            done = any(r.kind == "part" for r in self.rows)
+            openalex = "2027-01-13" if done else "2026-10-14"
+            return state.model_copy(
+                update={
+                    "releases": {**state.releases, "openalex_works": openalex},
+                    "built_from": {"openalex_works": openalex},
+                }
+            )
+
+    source, sink, progress = RangedSource(), SettledSink(), MovingProgress()
+    source.base_rows = [SourceRows(corpusid=1, paper=paper_row(1, 10))]
+    service = SearchIndexService(source=source, sink=sink, shards=1)
+    commands: list[IndexPapers] = []
+
+    async def index(command: IndexPapers) -> IndexPapersResult:
+        commands.append(command)
+        return await service.index(command)
+
+    @flow(persist_result=False)
+    async def run() -> SearchIndexResult:
+        return await run_index(
+            service,
+            source,
+            sink,
+            progress,
+            execution=lambda: admission.execution(release_on_exception=True),
+            base_parts=1,
+            diff_parts=1,
+            parallelism=1,
+            index=index,
+        )
+
+    with pytest.raises(SearchRejected, match="source tables changed"):
+        await run()
+    assert sink.target is None and not [r for r in progress.rows if r.kind == "complete"]
+    assert [c.openalex_release for c in commands] == ["2026-10-14"]
 
 
 def test_index_deployment_queues_and_triggers_from_loads() -> None:
