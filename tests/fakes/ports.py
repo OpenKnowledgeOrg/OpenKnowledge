@@ -125,6 +125,7 @@ class FakeSource:
         self.cut: set[str] = set()
         self.declared: dict[str, int | None] = {}
         self.records: dict[str, int] = {}
+        self.sizes: dict[str, int] = {}
         self.reorder = False
         self.diffs: dict[str, list[tuple[str, str, list[str], list[str]]]] = {}
         self.diff_files: dict[str, bytes] = {}
@@ -170,6 +171,7 @@ class FakeSource:
                     f"https://files.test{shard_ref(dataset, name).source_path}"
                     f"?AWSAccessKeyId=AKIAFAKE&Signature=secret{self.listings}"
                 ),
+                size=self.sizes.get(name),
                 records=self.records.get(name),
             )
             for name in names

@@ -471,6 +471,11 @@ class DownloadDatasetService:
                 f"{path} holds {existing.size} bytes, but the source declares "
                 f"{declared.expected_size}; {_delete_hint(path)}"
             )
+        if link.size is not None and link.size != existing.size:
+            raise StoredCopyMismatch(
+                f"{path} holds {existing.size} bytes, but the source lists {link.size}; "
+                f"{_delete_hint(path)}"
+            )
         source = await self._store.open_read(existing.ref)
         check = ParquetCheck(link.records) if parquet else StreamCheck()
         try:

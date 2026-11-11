@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import zlib
+from collections import deque
 from collections.abc import Iterator
 
 import pyarrow as pa
@@ -133,7 +134,8 @@ class ParquetCheck:
         self._md5 = hashlib.md5(usedforsecurity=False)
         self._size = 0
         self._head = b""
-        self._tail = bytearray()
+        self._tail: deque[bytes] = deque()
+        self.tail_size = 0
         self.report: IntegrityReport | None = None
 
     def update(self, data: bytes) -> None:
@@ -141,10 +143,18 @@ class ParquetCheck:
         self._md5.update(data)
         self._size += len(data)
         if len(self._head) < len(MAGIC):
-            self._head = (self._head + data)[: len(MAGIC)]
-        self._tail += data
-        if len(self._tail) > 2 * (MAX_FOOTER + 8):  # trimmed in batches, not on every chunk
-            del self._tail[: len(self._tail) - (MAX_FOOTER + 8)]
+            self._head += data[: len(MAGIC) - len(self._head)]
+        keep = data[-(MAX_FOOTER + 8) :]
+        self._tail.append(keep)
+        self.tail_size += len(keep)
+        while self.tail_size > MAX_FOOTER + 8:
+            excess = self.tail_size - (MAX_FOOTER + 8)
+            first = self._tail[0]
+            if len(first) <= excess:
+                self._tail.popleft()
+            else:
+                self._tail[0] = first[excess:]
+            self.tail_size -= min(len(first), excess)
 
     def finish(self, expected_size: int) -> IntegrityReport:
         if self._size != expected_size:
@@ -165,7 +175,7 @@ class ParquetCheck:
         return self.report
 
     def _footer_rows(self) -> int:
-        tail = bytes(self._tail[-(MAX_FOOTER + 8) :])
+        tail = b"".join(self._tail)
         if self._size < 12 or self._head != MAGIC or tail[-4:] != MAGIC:
             raise ParquetInvalid("the object lacks the PAR1 magic at its start or end")
         length = int.from_bytes(tail[-8:-4], "little")

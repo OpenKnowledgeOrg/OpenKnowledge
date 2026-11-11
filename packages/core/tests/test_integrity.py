@@ -4,6 +4,7 @@ import zlib
 
 import pytest
 
+from openknowledge_core.ingestion import integrity
 from openknowledge_core.ingestion.errors import (
     GzipInvalid,
     IncompleteTransfer,
@@ -27,7 +28,7 @@ from tests.fakes.ports import gz, parquet
     ],
 )
 def test_gzip_check_accepts_whole_streams_in_any_chunking(data: bytes) -> None:
-    for step in (1, 7, 4096, len(data)):
+    for step in (1, 7, 1024, len(data)):
         check = GzipCheck()
         for start in range(0, len(data), step):
             check.update(data[start : start + step])
@@ -102,11 +103,16 @@ def test_stream_check_compares_the_declared_length() -> None:
 
 
 @pytest.mark.parametrize("step", [1, 7, 1 << 20])
-def test_parquet_check_counts_footer_rows_in_any_chunking(step: int) -> None:
+def test_parquet_check_counts_footer_rows_in_any_chunking(
+    step: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(integrity, "MAX_FOOTER", 1024)  # small, so the file outgrows the tail
     data = parquet(rows=1000, row_group_size=300)
+    assert len(data) > 2 * 1024
     check = ParquetCheck(expected_records=1000)
     for start in range(0, len(data), step):
         check.update(data[start : start + step])
+        assert check.tail_size <= 1024 + 8
     report = check.finish(len(data))
     assert (report.records, report.gzip_members, report.size) == (1000, 0, len(data))
     assert report.sha256 == hashlib.sha256(data).hexdigest()
