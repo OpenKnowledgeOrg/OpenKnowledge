@@ -440,7 +440,7 @@ def openalex_archive(release: str, bucket: str, prefix: str, dataset: str | None
         deployments.openalex_datasets(command)
     except ValueError as exc:
         raise click.UsageError(str(exc)) from None
-    _require_managed_server(())
+    _require_managed_server((deployments.OPENALEX_LIMIT,))
     _settings(OpenAlexBatchSettings)
     _run_managed(lambda: deployments.openalex_batch_download(command))
 

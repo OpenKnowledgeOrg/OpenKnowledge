@@ -53,15 +53,25 @@ DEPLOYMENT = "control-vm"
 # for loads and the watchdog; deployment queues alone do not reserve runner capacity.
 RUNS_AT_ONCE = 3
 S2_LIMIT = "semantic-scholar"
+OPENALEX_LIMIT = "openalex"
 LOAD_LIMIT = "clickhouse"
 WATCHDOG_CRON = "0 */6 * * *"
 
 
 def one_s2_user() -> AbstractAsyncContextManager[None]:
+    return _one_user(S2_LIMIT)
+
+
+def one_openalex_archiver() -> AbstractAsyncContextManager[None]:
+    """Held through recovery and download, since recovery deletes every queued OpenAlex job."""
+    return _one_user(OPENALEX_LIMIT)
+
+
+def _one_user(limit: str) -> AbstractAsyncContextManager[None]:
     # Keep supervising existing Batch work if global lease renewal fails; deployment
     # leases can still cancel runs. Busy refusals fail and trigger run_failed alerts.
     return concurrency(
-        S2_LIMIT,
+        limit,
         strict=True,
         max_retries=0,
         raise_on_lease_renewal_failure=False,
@@ -194,10 +204,11 @@ async def s2_batch_download_embeddings_diff(command: DownloadDiff) -> BatchDiffD
 
 @flow(name="openalex-batch-download", persist_result=False)
 async def openalex_batch_download(command: ArchiveRelease) -> ArchiveReleaseResult:
-    """Archive one release, works first, with no S2 limit: OpenAlex has no key to ration."""
+    """Archive one release, works first, under its own limit so S2 runs are never held up."""
     datasets = openalex_datasets(command)
     settings = OpenAlexBatchSettings()  # pyright: ignore[reportCallIssue]
     async with (
+        one_openalex_archiver(),
         admission.execution(),
         bootstrap.open_openalex_download(settings) as (service, jobs),
     ):
@@ -281,7 +292,7 @@ async def watchdog() -> WatchdogResult:
 def ensure_limits() -> None:
     """Create the global limits the flows take, since a strict limit must exist before a run."""
     with get_client(sync_client=True) as client:
-        for name in (S2_LIMIT, LOAD_LIMIT):
+        for name in (S2_LIMIT, OPENALEX_LIMIT, LOAD_LIMIT):
             try:
                 client.read_global_concurrency_limit_by_name(name)
             except ObjectNotFound:
@@ -318,7 +329,7 @@ def serve() -> None:
         ),
         # Each download deployment queues its own runs. All six compete for S2_LIMIT; busy
         # runs fail promptly so they do not occupy runner slots while waiting globally. The
-        # OpenAlex archive takes no S2_LIMIT, so it never blocks or waits on an S2 sync.
+        # OpenAlex archive takes OPENALEX_LIMIT, so it and an S2 sync never block each other.
         *(
             RunnerDeployment.from_flow(
                 download,
