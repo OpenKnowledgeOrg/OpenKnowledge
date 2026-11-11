@@ -21,8 +21,8 @@ FEATURE_FILES = {"models.py", "commands.py", "service.py", "ports.py", "errors.p
 # No project, core feature, adapter or extra may exist outside these sets.
 ALLOWED_PROJECTS = {"packages/contracts", "packages/core", "packages/adapters", "pipelines"}
 ALLOWED_FEATURES = {"ingestion", "search"}
-ALLOWED_ADAPTERS = {"semantic_scholar", "gcs", "clickhouse", "batch", "opensearch"}
-ALLOWED_EXTRAS = {"semantic-scholar", "gcs", "clickhouse", "batch", "opensearch"}
+ALLOWED_ADAPTERS = {"semantic_scholar", "openalex", "gcs", "clickhouse", "batch", "opensearch"}
+ALLOWED_EXTRAS = {"semantic-scholar", "openalex", "gcs", "clickhouse", "batch", "opensearch"}
 
 
 def source(package: str) -> Path:
@@ -136,6 +136,7 @@ def providers(name: str, modules: dict[str, set[str]]) -> set[str]:
         ("openknowledge_core", None, None),
         ("openknowledge_adapters", None, None),
         ("openknowledge_adapters", "semantic_scholar", "semantic-scholar"),
+        ("openknowledge_adapters", "openalex", "openalex"),
         ("openknowledge_adapters", "gcs", "gcs"),
         ("openknowledge_adapters", "clickhouse", "clickhouse"),
         ("openknowledge_adapters", "batch", "batch"),
