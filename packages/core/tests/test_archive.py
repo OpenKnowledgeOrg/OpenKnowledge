@@ -5,7 +5,6 @@ import json
 
 import pytest
 
-from openknowledge_contracts import sources as sources_module
 from openknowledge_contracts.manifests import DatasetManifest, ObjectPath
 from openknowledge_contracts.sources import SOURCES, ArchivedDataset, Source
 from openknowledge_core.ingestion import DownloadDataset, DownloadDatasetService, PinRelease
@@ -304,23 +303,14 @@ async def test_partition_folders_keep_same_named_files_apart(
     ]
 
 
-async def test_partitioned_archives_complete(
-    source: FakeSource, store: FakeStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    openalex = Source(
-        name="openalex",
-        prefix="openalex",
-        datasets={"works": ArchivedDataset("parquet", folders=1)},
-        contracts={},
-    )
-    monkeypatch.setattr(sources_module, "SOURCES", {"openalex": openalex})
+async def test_partitioned_archives_complete(source: FakeSource, store: FakeStore) -> None:
     service = DownloadDatasetService(
         catalog=source,
         downloads=source,
         store=store,
         producer=PRODUCER,
         clock=clock,
-        source=openalex,
+        source=SOURCES["openalex"],
     )
     for day in ("2026-10-14", "2026-10-13"):
         source.add("works", f"updated_date={day}/part_0000.parquet", parquet(10))

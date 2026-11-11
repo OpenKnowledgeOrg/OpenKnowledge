@@ -1769,6 +1769,9 @@ gcs = [
     { name = "gcloud-aio-auth" },
     { name = "gcloud-aio-storage" },
 ]
+openalex = [
+    { name = "httpx" },
+]
 opensearch = [
     { name = "opensearch-py", extra = ["async"] },
 ]
@@ -1790,6 +1793,7 @@ requires-dist = [
     { name = "gcloud-aio-auth", marker = "extra == 'gcs'", specifier = ">=5.4.4,<6" },
     { name = "gcloud-aio-storage", marker = "extra == 'gcs'", specifier = ">=9.6,<10" },
     { name = "httpx", marker = "extra == 'clickhouse'", specifier = ">=0.28,<1" },
+    { name = "httpx", marker = "extra == 'openalex'", specifier = ">=0.28,<1" },
     { name = "httpx", marker = "extra == 'semantic-scholar'", specifier = ">=0.28,<1" },
     { name = "openknowledge-contracts", editable = "packages/contracts" },
     { name = "openknowledge-core", editable = "packages/core" },
@@ -1797,7 +1801,7 @@ requires-dist = [
     { name = "pyarrow", marker = "extra == 'clickhouse'", specifier = ">=26,<27" },
     { name = "pydantic", specifier = ">=2.11,<3" },
 ]
-provides-extras = ["gcs", "semantic-scholar", "clickhouse", "batch", "opensearch"]
+provides-extras = ["gcs", "semantic-scholar", "openalex", "clickhouse", "batch", "opensearch"]
 
 [package.metadata.requires-dev]
 dev = [

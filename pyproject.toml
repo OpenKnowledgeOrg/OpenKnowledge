@@ -123,6 +123,20 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "The OpenAlex adapter imports only its own extra"
+type = "forbidden"
+source_modules = ["openknowledge_adapters.openalex"]
+forbidden_modules = [
+    "google",
+    "gcloud",
+    "aiohttp",
+    "openknowledge_adapters.gcs",
+    "openknowledge_adapters.clickhouse",
+    "openknowledge_adapters.batch",
+    "openknowledge_adapters.opensearch",
+]
+
+[[tool.importlinter.contracts]]
 name = "The GCS adapter imports only its own extra"
 type = "forbidden"
 source_modules = ["openknowledge_adapters.gcs"]
