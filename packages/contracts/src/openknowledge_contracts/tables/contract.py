@@ -18,6 +18,9 @@ and operation. A contract with an ``enriched`` field ranks a row holding it abov
 after release and deletion.
 
 A snapshot contract's table also has a ``removed`` column, which a load never sets.
+
+A source that delivers one archived dataset as several tables projects each table from it:
+the contract's ``archive`` names that dataset, and the contract's name stays its own.
 """
 
 from __future__ import annotations
@@ -62,6 +65,8 @@ class DatasetContract:
         enriched: A nullable field that some records of a key may lack within one release
             while others hold it. A key may then repeat with that difference alone, as long
             as every record holding it agrees, and the table keeps a record holding it.
+        archive: The archived dataset the table is projected from, when it is not the one
+            of the contract's own name.
     """
 
     name: DatasetName
@@ -71,6 +76,7 @@ class DatasetContract:
     null_as_empty: frozenset[str] = frozenset()
     updates: UpdateMode = "diffs"
     enriched: str | None = None
+    archive: DatasetName | None = None
 
     def __post_init__(self) -> None:
         """Refuse a missing or nullable key, and field names that repeat or are taken."""
@@ -89,6 +95,11 @@ class DatasetContract:
             self.enriched in self.source.names and fields[self.enriched].nullable
         ):
             raise ValueError(f"{self.name}: enriched {self.enriched!r} must be a nullable field")
+
+    @property
+    def archived(self) -> DatasetName:
+        """The archived dataset the rows are read from."""
+        return self.archive or self.name
 
     @property
     def schema(self) -> pa.Schema:
