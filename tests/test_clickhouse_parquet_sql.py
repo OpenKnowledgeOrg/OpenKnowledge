@@ -6,6 +6,7 @@ load reads, since ClickHouse reads no other.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ from openknowledge_contracts.sources import all_contracts
 from openknowledge_contracts.tables import DatasetContract
 from openknowledge_contracts.tables.clickhouse import table_columns
 from openknowledge_contracts.tables.fields import fields_of
-from openknowledge_contracts.tables.openalex import WORKS
+from openknowledge_contracts.tables.openalex import WORKS, WORKS_ABSTRACTS
 from tests.clickhouse_local import clickhouse_local, needs_clickhouse, run, up
 
 RELEASE = "2026-10-14"
@@ -215,11 +216,69 @@ def test_a_works_file_lands_with_normalised_ids(tmp_path: Path) -> None:
         None,
     ],
 )
-def test_an_id_that_is_not_a_work_stops_the_insert(tmp_path: Path, bad: str | None) -> None:
+@pytest.mark.parametrize("contract", [WORKS, WORKS_ABSTRACTS], ids=lambda c: c.name)
+def test_an_id_that_is_not_a_work_stops_the_insert(
+    tmp_path: Path, bad: str | None, contract: DatasetContract
+) -> None:
     write_works(tmp_path / "w.parquet", [work("https://openalex.org/W1"), work(bad)])
     result = run(
-        f"{up()}\n{parquet_upsert_query(WORKS, 'file')};", tmp_path / "db",
+        f"{up()}\n{parquet_upsert_query(contract, 'file')};", tmp_path / "db",
         **params(tmp_path / "w.parquet"),
     )  # fmt: skip
     assert result.returncode != 0
-    assert "openalex_works: id breaks the contract" in result.stderr
+    assert f"{contract.table}: id breaks the contract" in result.stderr
+
+
+def decode(index: str | None) -> str:
+    if index in (None, "", "null"):
+        return ""
+    words: dict[str, list[int]] = json.loads(index)
+    return " ".join(w for _, w in sorted((p, w) for w, ps in words.items() for p in ps))
+
+
+INDEXES = {
+    1: '{"Results":[0],"show,":[1],"that":[2],"it":[3],"works.":[4]}',
+    2: '{"the":[0,3],"cat":[1],"saw":[2],"dog":[4]}',
+    3: '{"\\u00dcber":[0],"die":[1],"Größe":[2],"von":[3],"细胞":[4]}',
+    4: "{}",
+    5: None,
+    6: '{"gap":[0],"here":[5],"then":[9]}',
+    7: '{"b":[1],"a":[1],"x":[0]}',
+}
+
+
+@needs_clickhouse
+def test_the_rebuilt_abstract_matches_a_python_decode(tmp_path: Path) -> None:
+    write_works(
+        tmp_path / "a.parquet",
+        [work(f"https://openalex.org/W{k}", abstract=v) for k, v in INDEXES.items()],
+    )
+    rows = load_and_select(tmp_path, WORKS_ABSTRACTS, "a.parquet")
+    got = {int(key): row["abstract"] for key, row in rows.items()}
+    assert got == {k: decode(v) for k, v in INDEXES.items()}
+    assert got[1] == "Results show, that it works." and got[2] == "the cat saw the dog"
+    assert got[3] == "Über die Größe von 细胞" and got[6] == "gap here then" and got[7] == "x a b"
+    assert got[4] == got[5] == ""
+
+
+@needs_clickhouse
+@pytest.mark.parametrize(
+    "bad",
+    [
+        '{"neg":[-1]}',
+        '{"big":[4294967296]}',
+        '{"half":[1.5]}',
+        '{"a":[0],"a":[1]}',
+        '{"a":0}',
+        "[1, 2]",
+        "not json",
+    ],
+)
+def test_a_malformed_index_stops_the_insert(tmp_path: Path, bad: str) -> None:
+    write_works(tmp_path / "a.parquet", [work("https://openalex.org/W1", abstract=bad)])
+    result = run(
+        f"{up()}\n{parquet_upsert_query(WORKS_ABSTRACTS, 'file')};", tmp_path / "db",
+        **params(tmp_path / "a.parquet"),
+    )  # fmt: skip
+    assert result.returncode != 0
+    assert "openalex_abstracts: abstract_inverted_index breaks the contract" in result.stderr
