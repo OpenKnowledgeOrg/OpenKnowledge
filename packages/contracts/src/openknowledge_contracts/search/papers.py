@@ -1,6 +1,8 @@
 """``papers``: one search document per live paper, with its abstract and TLDR when present.
 
-The document is built from the current rows of the ``papers``, ``abstracts`` and ``tldrs`` tables.
+The document is built from the current rows of the ``papers``, ``paper_abstract_best`` and
+``tldrs`` tables. The abstract is Semantic Scholar's when it has a live one, else that of the
+paper's chosen OpenAlex work, and ``abstract_source`` says which.
 Its counts are ``long`` because the tables hold them as ``UInt32``, which an ``integer`` field, a
 signed 32-bit number, cannot take at its top. ``externalids`` lists the identifier kinds the
 index knows; Semantic Scholar adds kinds without notice, and those stay out of the index. The
@@ -13,12 +15,13 @@ from openknowledge_contracts.search.contract import CONTRACT_VERSION, SearchCont
 
 PAPERS = SearchContract(
     name="papers",
-    version=2,
+    version=3,
     id_field="corpusid",
     fields=(
         SearchField("corpusid", "keyword"),
         SearchField("title", "english", subfields=(SearchField("exact", "text"),)),
         SearchField("abstract", "english"),
+        SearchField("abstract_source", "keyword"),
         SearchField("tldr", "english"),
         SearchField(
             "authors",

@@ -28,8 +28,8 @@ def mapped(fields: tuple[SearchField, ...], properties: dict[str, Any]) -> None:
             assert properties[field.name] == expected
 
 
-def test_every_field_is_mapped_and_the_contract_is_at_version_2() -> None:
-    assert PAPERS.version == 2
+def test_every_field_is_mapped_and_the_contract_is_at_version_3() -> None:
+    assert PAPERS.version == 3
     body = index_body(PAPERS, shards=3)
     properties = body.mappings["properties"]
     mapped(PAPERS.fields, properties)
@@ -37,6 +37,7 @@ def test_every_field_is_mapped_and_the_contract_is_at_version_2() -> None:
     assert properties["externalids"]["dynamic"] is False
     assert properties["title"]["fields"] == {"exact": {"type": "text", "analyzer": "standard"}}
     assert properties["tldr"] == {"type": "text", "analyzer": "english"}
+    assert properties["abstract_source"] == {"type": "keyword", "ignore_above": 8191}
     assert properties["venue"]["normalizer"] == "lowercase"
     assert properties["journal"]["properties"] == {
         "name": {"type": "keyword", "ignore_above": 8191, "normalizer": "lowercase"},
