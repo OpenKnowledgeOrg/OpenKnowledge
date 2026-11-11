@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from openknowledge_adapters.clickhouse.crosswalk import XWALK_COLUMNS, xwalk_select
 from openknowledge_adapters.clickhouse.read_tables import (
     COLUMNS,
     DELTA,
@@ -162,3 +163,60 @@ def test_delta_takes_keys_after_start_up_to_end(source: str, tmp_path: Path) -> 
     """
     # Keys 2 and 5 come twice in range but count once; a capped delta stops one key past its cap.
     assert clickhouse_local(sql, tmp_path) == [{"key": 2}, {"key": 3}, {"key": 5}, {"keys": 2}]
+
+
+@needs_clickhouse
+def test_xwalk_full_build_ranks_every_candidate(tmp_path: Path) -> None:
+    sql = f"""
+        {up()}
+        INSERT INTO papers (corpusid, externalids, title, year, source_release, is_deleted)
+        VALUES (1, {{'DOI': 'https://doi.org/10.1000/ABC'}}, '', NULL, '2026-10-01', 0),
+               (2, {{'DOI': '10.1000/x', 'PubMed': '77'}}, '', NULL, '2026-10-01', 0),
+               (3, {{'DOI': '10.1000/pub', 'ArXiv': '2101.00001v2'}}, '', NULL, '2026-10-01', 0),
+               (4, {{'MAG': '500'}}, 'Deep Nets: A Study', 2020, '2026-10-01', 0),
+               (5, {{'MAG': '600'}}, 'Other', 2020, '2026-10-01', 0),
+               (7, {{'DOI': '10.1000/dup'}}, '', NULL, '2026-10-01', 0),
+               (8, {{'DOI': '10.1000/dup'}}, '', NULL, '2026-10-01', 0),
+               (9, {{'DOI': '10.1000/gone'}}, '', NULL, '2026-10-01', 1),
+               (10, {{'DOI': '10.1000/removed'}}, '', NULL, '2026-10-01', 0),
+               (11, {{'DOI': '10.1000/many'}}, '', NULL, '2026-10-01', 0),
+               (12, {{'DOI': '10.1000/tie'}}, '', NULL, '2026-10-01', 0);
+        INSERT INTO openalex_works (work_id, doi_norm, pmid, mag, title, publication_year, type,
+            has_abstract, is_xpac, removed, source_release, is_deleted)
+        VALUES (10, '10.1000/abc', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
+               (20, '10.1000/x', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
+               (21, NULL, 77, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
+               (30, '10.48550/arxiv.2101.00001', NULL, NULL, NULL, NULL, 'preprint', 1, 0, 0,
+                '2026-10-01', 0),
+               (31, '10.1000/pub', NULL, NULL, NULL, NULL, 'article', 1, 0, 0, '2026-10-01', 0),
+               (40, NULL, NULL, 500, 'deep nets — a study', 2021, NULL, 1, 0, 0, '2026-10-01', 0),
+               (60, NULL, NULL, 600, 'Other', 2023, NULL, 1, 0, 0, '2026-10-01', 0),
+               (70, '10.1000/dup', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
+               (90, '10.1000/gone', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
+               (100, '10.1000/removed', NULL, NULL, NULL, NULL, NULL, 1, 0, 1, '2026-10-01', 0),
+               (110, '10.1000/many', NULL, NULL, NULL, NULL, NULL, 0, 0, 0, '2026-10-01', 0),
+               (111, '10.1000/many', NULL, NULL, NULL, NULL, NULL, 1, 1, 0, '2026-10-01', 0),
+               (112, '10.1000/many', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
+               (120, '10.1000/tie', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
+               (121, '10.1000/tie', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0);
+        CREATE TABLE paper_xwalk_new AS paper_xwalk;
+        INSERT INTO paper_xwalk_new ({XWALK_COLUMNS}) {xwalk_select(None)};
+        SELECT * FROM paper_xwalk_new ORDER BY corpusid, rank FORMAT JSONEachRow;
+    """
+    rows = [tuple(row.values()) for row in clickhouse_local(sql, tmp_path)]
+    # corpusid, work_id, match_key, rank, chosen, shared_work
+    assert rows == [
+        (1, 10, "doi", 1, True, False),
+        (2, 20, "doi", 1, True, False),
+        (2, 21, "pmid", 2, False, False),
+        (3, 31, "doi", 1, True, False),
+        (3, 30, "doi", 2, False, False),
+        (4, 40, "mag", 1, True, False),
+        (7, 70, "doi", 1, True, True),
+        (8, 70, "doi", 1, True, True),
+        (11, 112, "doi", 1, True, False),
+        (11, 111, "doi", 2, False, False),
+        (11, 110, "doi", 3, False, False),
+        (12, 120, "doi", 1, True, False),
+        (12, 121, "doi", 2, False, False),
+    ]
