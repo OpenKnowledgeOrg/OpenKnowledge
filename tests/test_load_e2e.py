@@ -529,9 +529,11 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
         result = build(*args)
         assert result.exit_code == 0, result.output
         built = json.loads(result.output.splitlines()[-1])
-        assert built["paths"] == {"papers": "full", "citations": "full"}
+        assert built["paths"] == {"papers": "full", "citations": "full", "openalex": "full"}
         assert built["source_releases"] == {"papers": "2026-10-19", "citations": "2026-10-20"}
         assert built["tables"]["papers_slim"]["rows"] == 2
+        # No OpenAlex release is loaded: the crosswalk is built empty, with no quarterly marker.
+        assert built["tables"]["paper_xwalk"]["rows"] == 0
         assert query(ports, "SELECT corpusid, title FROM papers_slim ORDER BY corpusid") == (
             "101\tA Synthetic Paper\n18446744073709551615\tLatest title\n"
         )
@@ -540,15 +542,19 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
             for line in query(
                 ports,
                 "SELECT target, argMax(release, applied_at) AS release FROM applied "
-                "WHERE target IN ('papers_slim', 'citation_edges_out', 'citation_edges_in') "
+                "WHERE target IN ('papers_slim', 'citation_edges_out', 'citation_edges_in', "
+                "'paper_xwalk') "
                 "GROUP BY target ORDER BY target FORMAT JSONEachRow",
             ).splitlines()
         ]
         assert markers == [
             {"target": "citation_edges_in", "release": "2026-10-20"},
             {"target": "citation_edges_out", "release": "2026-10-20"},
+            {"target": "paper_xwalk", "release": "2026-10-19"},
             {"target": "papers_slim", "release": "2026-10-19"},
         ]
+        quarterly = "SELECT count() FROM applied WHERE target = 'paper_xwalk@openalex_works'"
+        assert query(ports, quarterly) == "0\n"
         for table in ("citation_edges_out", "citation_edges_in"):
             assert built["tables"][table]["rows"] == 3
             assert built["tables"][table]["seconds"] > 0
@@ -589,7 +595,11 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
     updated = build()
     assert updated.exit_code == 0, updated.output
     built = json.loads(updated.output.splitlines()[-1])
-    assert built["paths"] == {"papers": "current", "citations": "incremental"}
+    assert built["paths"] == {
+        "papers": "current",
+        "citations": "incremental",
+        "openalex": "current",
+    }
     # Citations 3, 4 and 5: the tombstones inserted by hand at 10-21 are in range, besides the diff.
     assert built["touched"] == {"citations": 3}
     assert set(built["tables"]) == {"citation_edges_out", "citation_edges_in"}
