@@ -206,6 +206,7 @@ class OpenAlexLoad(BaseModel):
 class OpenAlexLoadResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    sources: LoadDatasetResult
     works: LoadDatasetResult
     abstracts: LoadDatasetResult
 

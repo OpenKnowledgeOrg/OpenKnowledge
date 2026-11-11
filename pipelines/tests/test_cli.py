@@ -915,15 +915,16 @@ def test_openalex_pin_archives_the_manifest_under_openalex(store: FakeStore) -> 
 
 
 @pytest.mark.usefixtures("prefect_server")
-def test_openalex_load_fills_both_tables_without_an_s2_key(
+def test_openalex_load_fills_every_table_without_an_s2_key(
     monkeypatch: pytest.MonkeyPatch, oa_wired: DownloadDatasetService, store: FakeStore
 ) -> None:
     deployments.ensure_limits()
     archive = s2_download_flow(oa_wired, task_retries=0, retry_delay_seconds=0)
-    works = DownloadDataset(
-        release=OPENALEX_RELEASE, dataset="works", bucket="raw", prefix="openalex"
-    )
-    asyncio.run(archive(works))
+    for dataset in ("sources", "works"):
+        command = DownloadDataset(
+            release=OPENALEX_RELEASE, dataset=dataset, bucket="raw", prefix="openalex"
+        )
+        asyncio.run(archive(command))
     tables = FakeTables(store, archive={"works-abstracts": "works"})
 
     @asynccontextmanager
@@ -938,8 +939,9 @@ def test_openalex_load_fills_both_tables_without_an_s2_key(
     code, output = okp_oa("load", "--release", OPENALEX_RELEASE, *OA_TARGET)
     assert code == 0, output
     result = json.loads(output.splitlines()[-1])
-    assert (result["works"]["loaded"], result["abstracts"]["loaded"]) == (2, 2)
-    assert (result["works"]["live_rows"], result["abstracts"]["live_rows"]) == (14, 14)
+    tables_loaded = [(result[name]["table"], result[name]["loaded"]) for name in result]
+    assert tables_loaded == [("sources", 2), ("works", 2), ("works-abstracts", 2)]
+    assert {result[name]["live_rows"] for name in result} == {14}
 
 
 @pytest.mark.usefixtures("oa_wired")

@@ -29,7 +29,7 @@ from openknowledge_contracts.sources import all_contracts
 from openknowledge_contracts.tables import DatasetContract
 from openknowledge_contracts.tables.clickhouse import table_columns
 from openknowledge_contracts.tables.fields import fields_of
-from openknowledge_contracts.tables.openalex import WORKS, WORKS_ABSTRACTS
+from openknowledge_contracts.tables.openalex import OPENALEX_SOURCES, WORKS, WORKS_ABSTRACTS
 from tests.clickhouse_local import clickhouse_local, needs_clickhouse, run, up
 
 RELEASE = "2026-10-14"
@@ -343,3 +343,53 @@ def test_a_work_repeated_across_files_is_identical_or_conflicting(tmp_path: Path
     assert duplicates(tmp_path, WORKS, ["x.parquet", "z.parquet"])["examples"] == ["(5)"]
     # A release names every works file in one query, which ClickHouse parses up to 256 KiB.
     assert len(parquet_duplicates_query(WORKS, 1898).encode()) < 256 * 1024
+
+
+SOURCES_FILE = pa.schema(
+    [
+        ("id", _S), ("issn_l", _S), ("display_name", _S), ("host_organization", _S),
+        ("host_organization_name", _S), ("is_oa", _B), ("is_in_doaj", _B), ("is_core", _B),
+        ("homepage_url", _S), ("country_code", _S), ("type", _S),
+        ("updated_date", pa.timestamp("us", tz="UTC")),
+    ]
+)  # fmt: skip
+
+
+def write_sources(path: Path, ids: list[str]) -> None:
+    rows = [
+        {
+            "id": id,
+            "display_name": "A Journal",
+            "type": "journal",
+            "is_oa": True,
+            "updated_date": datetime(2026, 2, 9, 1, 2, 3, 456, tzinfo=UTC),
+        }
+        for id in ids
+    ]
+    table = pa.Table.from_pylist(rows, schema=SOURCES_FILE)
+    pq.write_table(table, path)  # pyright: ignore[reportUnknownMemberType]
+
+
+@needs_clickhouse
+def test_a_sources_file_lands_with_parsed_ids_and_refuses_a_work_id(tmp_path: Path) -> None:
+    write_sources(
+        tmp_path / "s.parquet", ["https://openalex.org/S4210194219", "https://openalex.org/S7"]
+    )
+    columns = ", ".join(c.name for c in table_columns(OPENALEX_SOURCES) if not c.materialized)
+    sql = f"""
+        SET session_timezone = 'UTC';
+        {up()}
+        {parquet_upsert_query(OPENALEX_SOURCES, "file")};
+        SELECT {columns} FROM openalex_sources ORDER BY source_id FORMAT JSONEachRow;
+    """
+    rows = clickhouse_local(sql, tmp_path / "db", **params(tmp_path / "s.parquet"))
+    assert [row["source_id"] for row in rows] == [7, 4210194219]
+    assert rows[0].items() >= {
+        "display_name": "A Journal", "type": "journal", "is_oa": True, "issn_l": None,
+        "updated_date": "2026-02-09 01:02:03", "removed": False,
+    }.items()  # fmt: skip
+    write_sources(tmp_path / "bad.parquet", ["https://openalex.org/W1"])
+    sql = f"{parquet_upsert_query(OPENALEX_SOURCES, 'file')};"
+    result = run(sql, tmp_path / "db", **params(tmp_path / "bad.parquet"))
+    assert result.returncode != 0
+    assert "openalex_sources: id breaks the contract" in result.stderr
