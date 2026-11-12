@@ -26,23 +26,56 @@ from openknowledge_core.ingestion.errors import TableRejected, TableUnavailable
 from openknowledge_core.ingestion.read_tables import (
     GROUPS,
     READ_TABLES,
-    SOURCE_OF,
     ReadTablesPath,
 )
 from tests.fakes.ports import NEXT, PRODUCER, RELEASE, applied_release, clock
 
-PAPERS, OUT, IN = READ_TABLES
+PAPERS, OUT, IN, XWALK = READ_TABLES
+S2 = ("papers", "citations")
+S2_TABLES = GROUPS["papers"] + GROUPS["citations"]
+QUARTERLY_XWALK = "paper_xwalk@openalex_works"
+OA_UUID = {"openalex_works": 50, "openalex_abstracts": 51}
 FULL, INCREMENTAL, CURRENT = ReadTablesPath.FULL, ReadTablesPath.INCREMENTAL, ReadTablesPath.CURRENT
 
 
 @pytest.mark.parametrize("table", READ_TABLES)
 @pytest.mark.parametrize(
     "state",
-    ["current_empty", "missing_table", "replaced", "missing_marker", "stale", "papers_moved"],
+    [
+        "current_empty",
+        "missing_table",
+        "replaced",
+        "missing_marker",
+        "stale",
+        "papers_moved",
+        "openalex_moved",
+        "openalex_unsettled",
+    ],
 )
 async def test_read_tables_current_only_for_all_sources(table: str, state: str) -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         query = request.content.decode()
+        target = request.url.params.get("param_target", "")
+        loaded = state.startswith("openalex_")
+        if "param_table" in request.url.params:
+            name = request.url.params["param_table"]
+            found = {"uuid": str(UUID(int=OA_UUID[name])), "total_rows": 100 if loaded else 0}
+            return httpx.Response(200, text=json.dumps(found))
+        if query.startswith("SELECT count() AS rows FROM"):
+            return httpx.Response(200, text='{"rows": 0}')
+        if target in OA_UUID or target == QUARTERLY_XWALK:
+            # A quarterly marker 2026-10-14 on the live crosswalk; OpenAlex now holds 2027-01-13,
+            # or, unsettled, only its works table does, so a build skips the group.
+            if not loaded:
+                return httpx.Response(200)
+            moved = target in OA_UUID and (state, target) != (
+                "openalex_unsettled",
+                "openalex_abstracts",
+            )
+            release = "2027-01-13" if moved else "2026-10-14"
+            found = applied_release(target, release, timedelta())
+            found = found.model_copy(update={"target_uuid": UUID(int=OA_UUID.get(target, 1))})
+            return httpx.Response(200, text=found.model_dump_json())
         if "FROM system.tables" in query:
             assert "database = currentDatabase()" in query
             assert all(name in query for name in READ_TABLES)
@@ -60,7 +93,6 @@ async def test_read_tables_current_only_for_all_sources(table: str, state: str) 
             return httpx.Response(200, text="\n".join(rows))
         assert "FROM applied" in query
         assert "ORDER BY applied_at DESC LIMIT 1" in query
-        target = request.url.params["param_target"]
         if target == table and state == "missing_marker":
             return httpx.Response(200)
         release = NEXT if target == table and state == "stale" else RELEASE
@@ -76,7 +108,7 @@ async def test_read_tables_current_only_for_all_sources(table: str, state: str) 
         )
         assert await edges.is_current(
             {"papers": NEXT if state == "papers_moved" else RELEASE, "citations": RELEASE}
-        ) is (state == "current_empty")
+        ) is (state in ("current_empty", "openalex_unsettled"))
 
 
 def marker(target: str, release: str, uuid: int = 1, from_release: str | None = None) -> str:
@@ -102,7 +134,11 @@ class FakeClickHouse:
         self.columns = {OUT, IN}
         self.free_space = DELTA_HEADROOM + 12800
         self.counts: dict[str, int] = {}
-        self.touched = {"papers": 0, "citations": 0}
+        self.touched = {"papers": 0, "citations": 0, "openalex": 0}
+        self.openalex_rows = 0
+        """Rows in each OpenAlex table; empty until the first OpenAlex load."""
+        self.ahead: dict[str, int] = {}
+        """Rows past the applied release, per OpenAlex table."""
         self.zero_ids: set[str] = set()
         self.fail: Callable[[httpx.Request], httpx.Response | None] = lambda request: None
         self.next_uuid = 20
@@ -147,6 +183,8 @@ class FakeClickHouse:
                     text="Code: 47. DB::Exception: Unknown expression identifier `citationid`",
                 )
             rows = [{"1": 1}] if query.split()[3] in self.zero_ids else []
+        elif query.startswith("SELECT count() AS rows FROM") and "source_release >" in query:
+            rows = [{"rows": self.ahead.get(query.split()[5], 0)}]
         elif query.startswith("SELECT count() AS rows FROM"):
             rows = [{"rows": self.counts.get(query.split()[5], 100)}]
         elif "FROM system.columns" in query and OUT in query:
@@ -168,6 +206,9 @@ class FakeClickHouse:
             ]
         elif "SELECT name, uuid" in query:
             rows = [{"name": name, "uuid": str(uuid)} for name, uuid in self.live.items()]
+        elif "FROM system.tables" in query and params["param_table"] in OA_UUID:
+            name = params["param_table"]
+            rows = [{"uuid": str(UUID(int=OA_UUID[name])), "total_rows": self.openalex_rows}]
         elif "FROM system.tables" in query:
             name = params["param_table"]
             rows = [{"uuid": str(self.live.get(name, UUID(int=1))), "total_rows": 100}]
@@ -179,7 +220,8 @@ class FakeClickHouse:
             self.staging.pop(name, None)
             rows = []
         elif query.startswith("CREATE TABLE"):
-            self.staging[query.split()[2]] = UUID(int=self.next_uuid)
+            name = query.removeprefix("CREATE TABLE ").removeprefix("IF NOT EXISTS ").split()[0]
+            self.staging[name] = UUID(int=self.next_uuid)
             self.next_uuid += 1
             rows = []
         elif query.startswith("INSERT INTO applied"):
@@ -192,8 +234,10 @@ class FakeClickHouse:
             source = next((source for source, delta in DELTA.items() if delta == name), None)
             if source is not None:
                 written = self.counts[name] = self.touched[source]
+            elif name.endswith("_new"):
+                written = 100
             else:
-                written = 100 if name.endswith("_new") else self.touched[SOURCE_OF[name]]
+                written = self.touched[next(key for key, found in GROUPS.items() if name in found)]
             summary = json.dumps({"written_rows": written})
             return httpx.Response(200, headers={"X-ClickHouse-Summary": summary})
         elif query.startswith("DELETE FROM"):
@@ -238,7 +282,10 @@ def in_order(events: Iterable[str], prefixes: Iterable[str]) -> bool:
 )
 async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: str) -> None:
     server = FakeClickHouse()
-    server.history = [marker(name, NEXT) for name in GROUPS]
+    # The crosswalk is current, so these builds concern the S2 groups alone.
+    server.history = [marker(name, NEXT) for name in S2] + [
+        marker(XWALK, NEXT, server.live[XWALK].int)
+    ]
     initial = server.live.copy()
     failed = False
     stages: list[tuple[str, str]] = []
@@ -285,13 +332,13 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             )
         if failure == "markers":
             # The new generation stays live but not current: swapping back is the riskier move.
-            assert all(server.live[name] != initial[name] for name in READ_TABLES)
+            assert all(server.live[name] != initial[name] for name in S2_TABLES)
             assert not server.markers
             assert not await edges.is_current({"papers": NEXT, "citations": NEXT})
         elif failure == "lost_answer":
             # The markers committed, so the next sync skips the build and only reclaims.
             assert await edges.is_current({"papers": NEXT, "citations": NEXT})
-            assert set(server.staging.values()) == set(initial.values())
+            assert set(server.staging.values()) == {initial[name] for name in S2_TABLES}
             await edges.reclaim()
             assert server.staging == {}
             return
@@ -309,18 +356,18 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         server.free_space, server.columns = 12800, {OUT, IN}
         result = await edges.build(PRODUCER, clock)
         assert result.source_releases == {"papers": NEXT, "citations": NEXT}
-        assert result.paths == {"papers": FULL, "citations": FULL}
+        assert result.paths == {"papers": FULL, "citations": FULL, "openalex": CURRENT}
         assert await edges.is_current(result.source_releases)
     assert [name for name, state in stages if state == "completed"] == [
         "read tables: recovery and plan",
         "read tables: preflight and recovery",
-        *(f"read tables: build {name}" for name in READ_TABLES),
+        *(f"read tables: build {name}" for name in S2_TABLES),
         "read tables: validate counts",
         "read tables: publish",
     ]
     assert server.staging == {}
     # One insert, so a failure cannot leave some tables marked and others not.
-    for name, line in zip(READ_TABLES, server.markers[-1].splitlines(), strict=True):
+    for name, line in zip(S2_TABLES, server.markers[-1].splitlines(), strict=True):
         recorded = json.loads(line)
         assert (recorded["target"], recorded["target_uuid"], recorded["release"]) == (
             name,
@@ -360,7 +407,7 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
     caplog.set_level(logging.INFO)
     server = FakeClickHouse()
     moved = {"papers": "papers", "in_only": "", "in_only_mismatch": ""}.get(case, "citations")
-    for source in GROUPS:
+    for source in S2:
         server.history.append(marker(source, RELEASE, 9 if case == "rebased" else 1))
         if source == moved:
             start = None if case == "new_base" else RELEASE
@@ -376,7 +423,7 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
     server.zero_ids = {OUT} if case == "ids_out" else {IN} if "in_only" in case else set()
     # 6 keys could drop more than a full rebuild keeps from the smaller edge table's 50 rows,
     # though not from the 100 rows of citations or of the larger one.
-    server.touched = {"papers": 4, "citations": 6 if case == "over_share" else 5}
+    server.touched = {"papers": 4, "citations": 6 if case == "over_share" else 5, "openalex": 3}
     if case == "over_share":
         server.counts[IN] = 50
     if case == "mismatch":
@@ -433,13 +480,19 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
         for event in server.events
         if event.startswith(("CREATE", "INSERT INTO", "DELETE", "EXCHANGE"))
     ]
-    recorded = [json.loads(line) for line in server.markers[-1].splitlines()]
+    # The crosswalk follows papers, in its own marker insert after the S2 groups'.
+    follows = ("openalex",) if moved == "papers" or case == "full" else ()
+    recorded = [
+        json.loads(line)
+        for body in server.markers[-1 - len(follows) : len(server.markers) - len(follows)]
+        for line in body.splitlines()
+    ]
     assert server.staging == {}
     if case in ("papers", "citations", "in_only_first"):
         assert result.paths == {
-            source: INCREMENTAL if source == moved else CURRENT for source in GROUPS
+            source: INCREMENTAL if source in (moved, *follows) else CURRENT for source in GROUPS
         }
-        assert result.touched == {moved: server.touched[moved]}
+        assert result.touched == {name: server.touched[name] for name in (moved, *follows)}
         assert [found["target"] for found in recorded] == list(GROUPS[moved])
         for found in recorded:
             assert found["target_uuid"] == str(server.live[found["target"]])
@@ -448,7 +501,7 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
     if case == "papers":
         # Review Focus 4: a papers-only diff writes nothing to the edge tables.
         assert not any("citation_edges" in event for event in writes)
-        assert server.live == initial and len(server.markers) == 1
+        assert server.live == initial and len(server.markers) == 2
     elif case == "citations":
         assert in_order(
             server.events,
@@ -484,7 +537,11 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
         assert server.live[IN] != initial[IN] and server.live[OUT] == initial[OUT]
     elif case == "in_only":
         # Rollout step 2: only the incoming edges are rebuilt, from the outgoing ones.
-        assert result.paths == {"papers": CURRENT, "citations": ReadTablesPath.IN_ONLY}
+        assert result.paths == {
+            "papers": CURRENT,
+            "citations": ReadTablesPath.IN_ONLY,
+            "openalex": CURRENT,
+        }
         assert result.touched == {}
         assert [event for event in writes if event.startswith("EXCHANGE")] == [
             f"EXCHANGE TABLES {IN}_new AND {IN}"
@@ -498,13 +555,105 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
         ] == [(IN, RELEASE, None)]
         assert recorded[0]["target_uuid"] == str(server.live[IN]) != str(initial[IN])
     else:
-        assert result.paths == {"papers": FULL, "citations": FULL}
+        assert result.paths == {
+            "papers": FULL,
+            "citations": FULL,
+            "openalex": FULL if follows else CURRENT,
+        }
         # A fallback keeps the count that sent it there.
         fell_back = case in ("over_share", "over_cap", "mismatch")
         assert result.touched == ({"citations": server.touched["citations"]} if fell_back else {})
-        assert all(f"CREATE TABLE {table}_new AS {table}" in writes for table in READ_TABLES)
-        assert [found["target"] for found in recorded] == list(READ_TABLES)
+        assert all(f"CREATE TABLE {table}_new AS {table}" in writes for table in S2_TABLES)
+        assert [found["target"] for found in recorded] == list(S2_TABLES)
         assert all(found["from_release"] is None for found in recorded)
         assert any(event.startswith("DELETE") for event in writes) is (case == "mismatch")
         if case == "mismatch":
             assert "citation edge counts differ" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "case", ["no_openalex", "new_openalex", "papers_diff", "kept_delta", "partial_openalex"]
+)
+async def test_openalex_group_rebuilds_alone_and_records_its_release(
+    case: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    server = FakeClickHouse()
+    server.touched = {"papers": 4, "citations": 5, "openalex": 3}
+    held = {"new_openalex": "2027-01-13", "no_openalex": None}.get(case, "2026-10-14")
+    server.openalex_rows = 0 if held is None else 100
+    for source in S2:
+        server.history.append(marker(source, RELEASE))
+    if case not in ("no_openalex", "new_openalex"):
+        server.history.append(marker("papers", NEXT, from_release=RELEASE))
+    for table in S2_TABLES:
+        server.history.append(marker(table, RELEASE, server.live[table].int))
+    if held is not None:
+        server.history += [marker(table, held, uuid) for table, uuid in OA_UUID.items()]
+        server.history += [
+            marker(XWALK, RELEASE, server.live[XWALK].int),
+            marker(QUARTERLY_XWALK, "2026-10-14", server.live[XWALK].int),
+        ]
+    if case == "papers_diff":
+        # The touched share is of the live papers: an empty crosswalk must not force a rebuild.
+        server.counts[XWALK] = 0
+    if case == "partial_openalex":
+        server.ahead["openalex_works"] = 5
+    if case == "kept_delta":
+        server.fail = lambda request: (
+            httpx.Response(500, text="synthetic insert failure")
+            if request.url.params.get("query", request.content.decode()).startswith(
+                f"INSERT INTO {XWALK} "
+            )
+            else None
+        )
+    async with read_tables(server) as edges:
+        if case == "kept_delta":
+            with pytest.raises(TableUnavailable):
+                await edges.build(PRODUCER, clock)
+            server.events.clear()
+            await edges.reclaim()
+            assert f"DROP TABLE IF EXISTS {DELTA['papers']}" in server.events
+            assert f"DROP TABLE IF EXISTS {DELTA['openalex']}" not in server.events
+            return
+        result = await edges.build(PRODUCER, clock)
+    writes = [
+        event
+        for event in server.events
+        if event.startswith(("CREATE", "INSERT INTO", "DELETE", "EXCHANGE"))
+    ]
+    recorded = [json.loads(line) for line in server.markers[-1].splitlines()]
+    if case == "no_openalex":
+        assert result.paths == {"papers": CURRENT, "citations": CURRENT, "openalex": FULL}
+        assert not any(event.startswith(f"EXCHANGE TABLES {PAPERS}") for event in writes)
+        assert [found["target"] for found in recorded] == [XWALK]
+        assert "openalex_works" not in result.source_releases
+    elif case == "new_openalex":
+        assert result.paths == {"papers": CURRENT, "citations": CURRENT, "openalex": FULL}
+        assert {(found["target"], found["release"]) for found in recorded} == {
+            (XWALK, RELEASE),
+            (QUARTERLY_XWALK, "2027-01-13"),
+        }
+        assert all(found["target_uuid"] == str(server.live[XWALK]) for found in recorded)
+        assert f"DROP TABLE IF EXISTS {DELTA['openalex']}" in server.events
+        assert result.source_releases["openalex_works"] == "2027-01-13"
+    elif case == "papers_diff":
+        assert result.paths == {
+            "papers": INCREMENTAL,
+            "citations": CURRENT,
+            "openalex": INCREMENTAL,
+        }
+        assert in_order(
+            server.events,
+            [
+                f"INSERT INTO {DELTA['openalex']}",
+                f"INSERT INTO {DELTA['openalex']}",
+                f"DELETE FROM {XWALK}",
+                f"INSERT INTO {XWALK} ",
+                "INSERT INTO applied",
+                f"DROP TABLE IF EXISTS {DELTA['openalex']}",
+            ],
+        )
+    else:
+        assert result.paths == {"papers": INCREMENTAL, "citations": CURRENT}
+        assert not any(XWALK in event for event in writes)
+        assert "openalex_works holds rows past its applied release" in caplog.text

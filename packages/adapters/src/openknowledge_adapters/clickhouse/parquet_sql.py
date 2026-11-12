@@ -36,6 +36,14 @@ _IS_WORK = "id IS NOT NULL AND match(id, '^https://openalex\\\\.org/W[1-9][0-9]{
 _IS_SOURCE = "id IS NOT NULL AND match(id, '^https://openalex\\\\.org/S[1-9][0-9]{0,18}$')"
 
 
+def strip_doi(column: str) -> str:
+    """``column`` lower-cased and trimmed, without a doi.org or ``doi:`` prefix."""
+    return (
+        f"replaceRegexpOne(lower(trimBoth(assumeNotNull({column}))), "
+        "'^(https?://(dx\\\\.)?doi\\\\.org/|doi:)', '')"
+    )
+
+
 def _ids(name: str) -> str:
     return f"toUInt64OrNull(extract(ifNull(ids['{name}'], ''), '(\\\\d+)/?$'))"
 
@@ -129,13 +137,7 @@ SELECTS: Mapping[DatasetName, Mapping[str, str]] = MappingProxyType(
 
 _WITH: Mapping[DatasetName, tuple[tuple[str, str], ...]] = MappingProxyType(
     {
-        "works": (
-            (
-                "replaceRegexpOne(lower(trimBoth(assumeNotNull(doi))), "
-                "'^(https?://(dx\\\\.)?doi\\\\.org/|doi:)', '')",
-                "doi_stripped",
-            ),
-        ),
+        "works": ((strip_doi("doi"), "doi_stripped"),),
         "works-abstracts": (
             ("ifNull(abstract_inverted_index, '')", "index_json"),
             (_IS_INDEX, "index_ok"),
