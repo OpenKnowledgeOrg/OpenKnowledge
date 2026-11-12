@@ -20,7 +20,7 @@ PROJECTS = {
 FEATURE_FILES = {"models.py", "commands.py", "service.py", "ports.py", "errors.py"}
 # No project, core feature, adapter or extra may exist outside these sets.
 ALLOWED_PROJECTS = {"packages/contracts", "packages/core", "packages/adapters", "pipelines"}
-ALLOWED_FEATURES = {"ingestion", "search"}
+ALLOWED_FEATURES = {"embeddings", "ingestion", "search"}
 ALLOWED_ADAPTERS = {"semantic_scholar", "gcs", "clickhouse", "batch", "opensearch"}
 ALLOWED_EXTRAS = {"semantic-scholar", "gcs", "clickhouse", "batch", "opensearch"}
 
