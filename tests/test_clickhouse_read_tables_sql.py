@@ -193,7 +193,8 @@ def test_xwalk_full_build_ranks_every_candidate(tmp_path: Path) -> None:
                (9, {{'DOI': '10.1000/gone'}}, '', NULL, '2026-10-01', 1),
                (10, {{'DOI': '10.1000/removed'}}, '', NULL, '2026-10-01', 0),
                (11, {{'DOI': '10.1000/many'}}, '', NULL, '2026-10-01', 0),
-               (12, {{'DOI': '10.1000/tie'}}, '', NULL, '2026-10-01', 0);
+               (12, {{'DOI': '10.1000/tie'}}, '', NULL, '2026-10-01', 0),
+               (13, {{'DOI': '10.1000/broken'}}, '', NULL, '2026-10-01', 0);
         INSERT INTO openalex_works (work_id, doi_norm, pmid, mag, title, publication_year, type,
             has_abstract, is_xpac, removed, source_release, is_deleted)
         VALUES (10, '10.1000/abc', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
@@ -211,7 +212,11 @@ def test_xwalk_full_build_ranks_every_candidate(tmp_path: Path) -> None:
                (111, '10.1000/many', NULL, NULL, NULL, NULL, NULL, 1, 1, 0, '2026-10-01', 0),
                (112, '10.1000/many', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
                (120, '10.1000/tie', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
-               (121, '10.1000/tie', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0);
+               (121, '10.1000/tie', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
+               (130, '10.1000/broken', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0),
+               (131, '10.1000/broken', NULL, NULL, NULL, NULL, NULL, 1, 0, 0, '2026-10-01', 0);
+        INSERT INTO openalex_abstracts (work_id, abstract, index_broken, source_release, is_deleted)
+        VALUES (130, '', 1, '2026-10-01', 0), (131, 'text', 0, '2026-10-01', 0);
         CREATE TABLE paper_xwalk_new AS paper_xwalk;
         INSERT INTO paper_xwalk_new ({XWALK_COLUMNS}) {xwalk_select(None)};
         SELECT * FROM paper_xwalk_new ORDER BY corpusid, rank FORMAT JSONEachRow;
@@ -232,6 +237,8 @@ def test_xwalk_full_build_ranks_every_candidate(tmp_path: Path) -> None:
         (11, 110, "doi", 3, False, False),
         (12, 120, "doi", 1, True, False),
         (12, 121, "doi", 2, False, False),
+        (13, 131, "doi", 1, True, False),
+        (13, 130, "doi", 2, False, False),
     ]
 
 

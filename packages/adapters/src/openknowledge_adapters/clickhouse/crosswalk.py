@@ -42,12 +42,15 @@ def _number(column: str) -> str:
     return f"nullIf(toUInt64OrNull(trimBoth(ifNull({column}, ''))), 0)"
 
 
+# A work whose index the abstracts load could not read has no abstract to offer.
 _WORKS = (
-    "SELECT work_id, doi_norm, pmid, mag, has_abstract, is_xpac, "
+    "SELECT work_id, doi_norm, pmid, mag, has_abstract AND work_id NOT IN ("
+    "SELECT work_id FROM openalex_abstracts FINAL "
+    "WHERE index_broken AND is_deleted = 0 AND NOT removed) AS with_abstract, is_xpac, "
     "ifNull(type, '') = 'preprint' AS is_preprint{extra} "
     "FROM openalex_works FINAL WHERE is_deleted = 0 AND NOT removed{where}"
 )
-_CANDIDATE = "w.work_id, toUInt8({order}), w.has_abstract, w.is_xpac, w.is_preprint"
+_CANDIDATE = "w.work_id, toUInt8({order}), w.with_abstract, w.is_xpac, w.is_preprint"
 
 
 def ranked_sql(keys: str | None) -> str:
@@ -65,12 +68,12 @@ def ranked_sql(keys: str | None) -> str:
     return (
         "SELECT corpusid, work_id, key_order, toUInt8(least(row_number() OVER ("
         "PARTITION BY corpusid "
-        "ORDER BY key_order, has_abstract DESC, is_xpac, is_preprint, work_id), 255)) AS rank "
+        "ORDER BY key_order, with_abstract DESC, is_xpac, is_preprint, work_id), 255)) AS rank "
         "FROM (SELECT corpusid, work_id, min(key_order) AS key_order, "
-        "any(has_abstract) AS has_abstract, any(is_xpac) AS is_xpac, "
+        "any(with_abstract) AS with_abstract, any(is_xpac) AS is_xpac, "
         "any(is_preprint) AS is_preprint FROM ("
         "SELECT s.corpusid AS corpusid, w.work_id AS work_id, toUInt8(1) AS key_order, "
-        "w.has_abstract AS has_abstract, w.is_xpac AS is_xpac, w.is_preprint AS is_preprint "
+        "w.with_abstract AS with_abstract, w.is_xpac AS is_xpac, w.is_preprint AS is_preprint "
         f"FROM ({works}) AS w INNER JOIN ({s2}) AS s ON w.doi_norm = s.doi "
         f"UNION ALL SELECT s.corpusid, {_CANDIDATE.format(order=1)} "
         f"FROM ({works}) AS w INNER JOIN ({s2}) AS s ON w.doi_norm = s.arxiv_doi "
