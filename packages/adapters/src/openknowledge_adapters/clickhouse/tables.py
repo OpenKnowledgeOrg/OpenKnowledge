@@ -17,6 +17,7 @@ from openknowledge_adapters.clickhouse.load_sql import (
     upsert_query,
 )
 from openknowledge_adapters.clickhouse.parquet_sql import (
+    broken_indexes_query,
     parquet_duplicates_parameters,
     parquet_duplicates_query,
     parquet_upsert_query,
@@ -118,6 +119,13 @@ class ClickHouseTables:
         if contract.updates == "snapshot":
             query += f" AND NOT {REMOVED}"
         rows = await self._client.rows(query, table=contract.table, release=release)
+        return int(rows[0]["rows"])
+
+    async def broken_indexes(self, dataset: DatasetName, release: ReleaseId) -> int:
+        query = broken_indexes_query(_contract(dataset))
+        if query is None:
+            return 0
+        rows = await self._client.rows(query, release=release)
         return int(rows[0]["rows"])
 
     async def duplicates(self, dataset: DatasetName, objects: Sequence[ObjectPath]) -> Duplicates:

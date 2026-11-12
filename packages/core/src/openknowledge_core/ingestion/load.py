@@ -208,6 +208,7 @@ class LoadDatasetService:
         manifest, table = prepared.manifest, prepared.table
         records = _record_count(prepared)
         live = await self._tables.live_rows(table.dataset, manifest.release_id)
+        broken = await self._tables.broken_indexes(table.dataset, manifest.release_id)
         duplicates = (
             Duplicates(identical_rows=0, conflicting_keys=0, examples=())
             if live == records
@@ -229,6 +230,7 @@ class LoadDatasetService:
             identical_duplicates=duplicates.identical_rows,
             enriched_duplicates=duplicates.enriched_rows,
             removed=removed,
+            broken_indexes=broken,
             manifest=prepared.manifest_path,
         )
 

@@ -4,8 +4,10 @@ The Parquet columns are typed, so a load reads only the columns it names and der
 column with one expression. Hive partitioning stays off: archived names keep OpenAlex's
 ``updated_date=<day>`` folder, which ClickHouse would otherwise read as the ``updated_date``
 column in place of the file's own. Values a column cannot hold stop the insert with
-``<table>: <field> breaks the contract``, as the JSON loads do. The SELECT list is positional and
-carries no aliases, so no alias can shadow a Parquet column of the same name.
+``<table>: <field> breaks the contract``, as the JSON loads do, except an abstract's inverted
+index: one that cannot be read loads as an empty abstract with ``index_broken`` set. The SELECT
+list is positional and carries no aliases, so no alias can shadow a Parquet column of the same
+name.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from openknowledge_contracts.tables import DatasetContract
 from openknowledge_contracts.tables.fields import fields_of
 
 _NO_HIVE = "use_hive_partitioning = 0"
+BROKEN_INDEX = "index_broken"
 # 'https://openalex.org/W' is 22 characters; 19 digits always fit UInt64.
 _WORK_ID = "toUInt64(substring(id, 23))"
 _IS_WORK = "id IS NOT NULL AND match(id, '^https://openalex\\\\.org/W[1-9][0-9]{0,18}$')"
@@ -50,9 +53,9 @@ _WORKS: dict[str, str] = {
     "is_xpac": "is_xpac",
     "is_retracted": "is_retracted",
     "is_paratext": "is_paratext",
-    # Not parsed here, which would read every index a second time. The abstracts check refuses
-    # empty words and empty position lists, so an index beyond these spellings of nothing
-    # always rebuilds to a non-empty abstract.
+    # Whether OpenAlex sent an index, not parsed here, which would read every index a second
+    # time. A readable index beyond these spellings of nothing rebuilds to a non-empty abstract,
+    # so an empty abstract beside a true has_abstract is one the abstracts load flagged broken.
     "has_abstract": (
         "NOT match(ifNull(abstract_inverted_index, ''), '^\\\\s*(null|\\\\{\\\\s*\\\\})?\\\\s*$')"
     ),
@@ -79,7 +82,8 @@ _ABSTRACT = (
     "kv -> arrayMap(p -> (p, tupleElement(kv, 1)), tupleElement(kv, 2)), "
     "JSONExtractKeysAndValues(index_json, 'Array(UInt32)'))))), ' ')"
 )
-# Positions are checked to fit UInt32, so the typed extraction above cannot clamp one silently.
+# An index failing this loads as an empty abstract. Positions are checked to fit UInt32, so the
+# typed extraction above cannot clamp one silently.
 _IS_INDEX = (
     "match(index_json, '^\\\\s*(null)?\\\\s*$') OR (JSONType(index_json) = 'Object' "
     "AND length(JSONExtractKeys(index_json)) = length(arrayDistinct(JSONExtractKeys(index_json))) "
@@ -92,7 +96,13 @@ _IS_INDEX = (
 SELECTS: Mapping[DatasetName, Mapping[str, str]] = MappingProxyType(
     {
         "works": MappingProxyType(_WORKS),
-        "works-abstracts": MappingProxyType({"work_id": _WORK_ID, "abstract": _ABSTRACT}),
+        "works-abstracts": MappingProxyType(
+            {
+                "work_id": _WORK_ID,
+                "abstract": f"if(index_ok, {_ABSTRACT}, '')",
+                BROKEN_INDEX: "NOT index_ok",
+            }
+        ),
         "sources": MappingProxyType(
             {
                 "source_id": "toUInt64(substring(id, 23))",
@@ -126,7 +136,10 @@ _WITH: Mapping[DatasetName, tuple[tuple[str, str], ...]] = MappingProxyType(
                 "doi_stripped",
             ),
         ),
-        "works-abstracts": (("ifNull(abstract_inverted_index, '')", "index_json"),),
+        "works-abstracts": (
+            ("ifNull(abstract_inverted_index, '')", "index_json"),
+            (_IS_INDEX, "index_ok"),
+        ),
     }
 )
 
@@ -139,10 +152,7 @@ CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
                 for name in ("is_xpac", "is_retracted", "is_paratext", "updated_date")
             ),
         ),
-        "works-abstracts": (
-            (_IS_WORK, "openalex_abstracts: id breaks the contract"),
-            (_IS_INDEX, "openalex_abstracts: abstract_inverted_index breaks the contract"),
-        ),
+        "works-abstracts": ((_IS_WORK, "openalex_abstracts: id breaks the contract"),),
         "sources": (
             (_IS_SOURCE, "openalex_sources: id breaks the contract"),
             ("updated_date IS NOT NULL", "openalex_sources: updated_date breaks the contract"),
@@ -171,6 +181,16 @@ def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> st
         f"SELECT\n    {selected}\n"
         f"FROM {_source(source)}\n"
         f"WHERE {where}"
+    )
+
+
+def broken_indexes_query(contract: DatasetContract) -> str | None:
+    """The live rows of ``release`` loaded from a broken index, for a table that flags them."""
+    if BROKEN_INDEX not in contract.source.names:
+        return None
+    return (
+        f"SELECT countIf({BROKEN_INDEX}) AS rows FROM {identifier(contract.table)} FINAL "
+        "WHERE source_release = {release:Date} AND NOT removed"
     )
 
 
