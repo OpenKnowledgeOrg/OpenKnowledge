@@ -11,7 +11,9 @@ from importlib.metadata import version
 from typing import TYPE_CHECKING
 
 from openknowledge_adapters import batch, clickhouse, gcs, opensearch, semantic_scholar
+from openknowledge_adapters.clickhouse.embedding_index import write_index
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
+from openknowledge_core.embeddings import ConvertJobs, EmbeddingConversion
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
     LoadDatasetService,
@@ -164,7 +166,13 @@ def watchdog_flow(service: WatchdogService, settings: WatchdogSettings) -> Watch
 async def open_batch_download(
     settings: BatchSettings,
 ) -> AsyncGenerator[tuple[DownloadDatasetService, ShardJobs], None]:
-    config = batch.BatchConfig(
+    config = _batch(settings, secrets={"S2_API_KEY": settings.batch_s2_key_secret})
+    async with open_service(settings) as service, batch.connect(config) as jobs:
+        yield service, jobs
+
+
+def _batch(settings: BatchSettings, *, secrets: dict[str, str]) -> batch.BatchConfig:
+    return batch.BatchConfig(
         project=settings.batch_project,
         region=settings.batch_region,
         service_account=settings.batch_service_account,
@@ -178,10 +186,22 @@ async def open_batch_download(
         poll_seconds=settings.batch_poll_seconds,
         wait_timeout_seconds=settings.batch_wait_timeout_seconds,
         environment={"OKP_IMAGE_DIGEST": settings.image_digest},
-        secrets={"S2_API_KEY": settings.batch_s2_key_secret},
+        secrets=secrets,
     )
-    async with open_service(settings) as service, batch.connect(config) as jobs:
-        yield service, jobs
+
+
+@asynccontextmanager
+async def open_embedding_conversion(
+    settings: CommonSettings,
+) -> AsyncGenerator[EmbeddingConversion, None]:
+    async with gcs.connect(_gcs(settings)) as store:
+        yield EmbeddingConversion(store, write_index)
+
+
+@asynccontextmanager
+async def open_conversion_jobs(settings: BatchSettings) -> AsyncGenerator[ConvertJobs, None]:
+    async with batch.connect(_batch(settings, secrets={})) as jobs:
+        yield jobs
 
 
 def batch_download_flows(

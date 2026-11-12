@@ -2,11 +2,14 @@
 
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
+from pathlib import Path
+from typing import cast
 
 import pytest
 
 from openknowledge_adapters.gcs import GcsConfig, connect
 from openknowledge_contracts.manifests import ObjectPath, ObjectRef
+from openknowledge_core.embeddings import EmbeddingStore
 from openknowledge_core.ingestion import ArtifactStore
 from openknowledge_core.ingestion.errors import GzipInvalid, IncompleteTransfer, ObjectChanged
 from tests.fakes.checksums import crc32c_b64, md5_b64
@@ -49,6 +52,16 @@ async def test_a_streamed_create_reports_size_checksums_and_generation(
     assert stored is not None
     assert (stored.size, stored.md5, stored.crc32c) == (len(DATA), md5_b64(DATA), crc32c_b64(DATA))
     assert stored.ref.generation > 0
+    assert await store.stat(PATH) == stored
+    assert await read(store, stored.ref) == DATA
+
+
+async def test_a_file_replaces_an_existing_object(store: ArtifactStore, tmp_path: Path) -> None:
+    await store.create(PATH, b"{}", content_type="application/json")
+    file = tmp_path / "upload"
+    file.write_bytes(DATA)
+    stored = await cast(EmbeddingStore, store).replace_file(PATH, file, content_type="x")
+    assert stored.size == len(DATA)
     assert await store.stat(PATH) == stored
     assert await read(store, stored.ref) == DATA
 

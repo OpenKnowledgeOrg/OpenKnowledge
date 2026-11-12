@@ -1,4 +1,4 @@
-"""Create-only objects in Google Cloud Storage over gcloud-aio-storage."""
+"""Objects in Google Cloud Storage over gcloud-aio-storage, created once or replaced from a file."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 import threading
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
+from pathlib import Path
 from typing import Any, cast
 
 import aiohttp
@@ -155,6 +156,28 @@ class GcsArtifactStore:
         if rejected is not None:
             raise rejected
         raise StoreUnavailable(f"GCS could not upload {path} ({kind}); rerun later")
+
+    async def replace_file(
+        self, path: ObjectPath, file: Path, *, content_type: str
+    ) -> StoredObject:
+        try:
+            with await asyncio.to_thread(file.open, "rb") as data:
+                metadata = await self._storage.upload(
+                    path.bucket,
+                    path.name,
+                    data,
+                    content_type=content_type,
+                    force_resumable_upload=True,
+                    timeout=self._timeout(os.fstat(data.fileno()).st_size),
+                )
+        except Exception as exc:
+            _, rejected = _upload_outcome(path, exc)
+            error = rejected or StoreUnavailable(
+                f"GCS could not upload {path} ({type(exc).__name__}); rerun later"
+            )
+        else:
+            return _stored(path, metadata)
+        raise error
 
     async def open_read(self, ref: ObjectRef) -> ByteStream:
         before = await self.stat(ref.path)

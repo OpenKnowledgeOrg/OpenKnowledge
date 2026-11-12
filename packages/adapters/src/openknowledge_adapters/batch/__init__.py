@@ -10,7 +10,7 @@ import aiohttp
 from gcloud.aio.auth import Token
 
 from openknowledge_adapters.batch.config import BatchConfig
-from openknowledge_adapters.batch.jobs import CloudBatchJobs, job_spec
+from openknowledge_adapters.batch.jobs import CloudBatchJobs, convert_spec, job_spec
 
 BATCH_API = "https://batch.googleapis.com/v1"
 SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
@@ -34,4 +34,4 @@ async def connect(
         )
 
 
-__all__ = ["BatchConfig", "CloudBatchJobs", "connect", "job_spec"]
+__all__ = ["BatchConfig", "CloudBatchJobs", "connect", "convert_spec", "job_spec"]

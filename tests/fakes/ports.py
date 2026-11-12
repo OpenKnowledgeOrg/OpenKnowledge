@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
@@ -15,6 +17,7 @@ from pydantic import SecretStr
 from openknowledge_contracts.datasets import DatasetSummary, ReleaseId, ReleaseMetadata, ShardRef
 from openknowledge_contracts.manifests import ObjectPath, ObjectRef, Producer
 from openknowledge_contracts.tables.contract import UpdateMode
+from openknowledge_core.embeddings import ConvertJob
 from openknowledge_core.ingestion.commands import DownloadDataset, DownloadDiff, DownloadShard
 from openknowledge_core.ingestion.errors import (
     IncompleteTransfer,
@@ -314,6 +317,13 @@ class FakeStore:
         self.content_types[str(path)] = content_type
         return self._stored(path)
 
+    async def replace_file(
+        self, path: ObjectPath, file: Path, *, content_type: str
+    ) -> StoredObject:
+        self.put(path, await asyncio.to_thread(file.read_bytes))
+        self.content_types[str(path)] = content_type
+        return self._stored(path)
+
     async def open_read(self, ref: ObjectRef) -> ByteStream:
         stored = self.objects.get(str(ref.path))
         if stored is None or stored.generation != ref.generation:
@@ -431,6 +441,7 @@ class FakeJobs:
         self.left: dict[str, bool] = {}
         self.deleted: list[str] = []
         self.waited: list[str] = []
+        self.converts: list[ConvertJob] = []
 
     async def running(self, family: ArchiveFamily = ArchiveFamily.CORE) -> dict[str, bool]:
         self.family = family
@@ -463,6 +474,12 @@ class FakeJobs:
             )
         name = f"job-{len(self.submitted)}"
         self.outcomes[name] = outcome
+        return name
+
+    async def submit_convert(self, job: ConvertJob) -> str:
+        self.converts.append(job)
+        name = f"convert-{len(self.converts)}"
+        self.outcomes[name] = JobOutcome.SUCCEEDED
         return name
 
     async def wait(self, name: str) -> JobOutcome:

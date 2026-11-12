@@ -13,6 +13,7 @@ from uuid import UUID
 import click
 from pydantic import BaseModel, ValidationError
 
+from openknowledge_core.embeddings import ConvertEmbeddings, ConvertEmbeddingShard
 from openknowledge_core.ingestion import (
     DownloadDataset,
     DownloadDiff,
@@ -57,6 +58,11 @@ OPTION_RULES = {
     ),
     "prefix": "--prefix must look like semantic-scholar, with no empty, '.' or '..' part",
     "from_release": "--from-release must look like 2026-09-29, the release before --release",
+}
+CONVERT_RULES = {
+    **OPTION_RULES,
+    "raw_bucket": OPTION_RULES["bucket"].replace("--bucket", "--raw-bucket"),
+    "curated_bucket": OPTION_RULES["bucket"].replace("--bucket", "--curated-bucket"),
 }
 PIN_RULES = {**OPTION_RULES, "release": "--release must be latest or look like 2026-10-06"}
 SETTING_RULES = {
@@ -495,6 +501,71 @@ def load_diff(from_release: str, release: str, dataset: str, bucket: str, prefix
             return await bootstrap.load_flows(service, settings).diff(command)
 
     _run_load(run)
+
+
+@main.group()
+def embeddings() -> None:
+    """SPECTER2 vectors as flat Float32 files with a corpusid index."""
+
+
+def _convert_options(function: Callable[..., None]) -> Callable[..., None]:
+    for option in (
+        click.option("--release", required=True, help=RELEASE_HELP),
+        click.option("--from-release", help="Convert this explicit diff instead of a base."),
+        click.option(
+            "--part",
+            type=click.Choice(["updates", "deletes"]),
+            help="With --from-release: the diff part to convert.",
+        ),
+        click.option("--raw-bucket", required=True, help="Bucket holding the archive."),
+        click.option("--prefix", default="semantic-scholar", show_default=True, help=PREFIX_HELP),
+        click.option("--curated-bucket", required=True, help="Bucket the converted files go to."),
+    ):
+        function = option(function)
+    return function
+
+
+@embeddings.command(
+    "convert", help="Convert each archived shard not yet converted, one Batch task per shard."
+)
+@_convert_options
+def convert(**options: str | None) -> None:
+    command = _command(ConvertEmbeddings, CONVERT_RULES, **options)
+    from openknowledge_pipelines import admission, deployments
+
+    _require_managed_server((deployments.S2_LIMIT,))
+    settings = _settings(BatchSettings)
+
+    async def run() -> BaseModel:
+        async with (
+            deployments.one_s2_user(),
+            admission.execution(),
+            bootstrap.open_embedding_conversion(settings) as service,
+            bootstrap.open_conversion_jobs(settings) as jobs,
+        ):
+            return await service.convert(command, jobs)
+
+    _run_managed(run)
+
+
+@embeddings.command("convert-shard", help="Convert one archived shard, without Prefect.")
+@_convert_options
+@click.option(
+    "--shard",
+    required=True,
+    envvar="OKP_SHARD",
+    metavar="N",
+    help="Index into the part's archive manifest; Batch tasks set OKP_SHARD.",
+)
+def convert_shard(shard: str, **options: str | None) -> None:
+    command = _command(ConvertEmbeddingShard, CONVERT_RULES, shard=shard, **options)
+    settings = _settings(CommonSettings)
+
+    async def run() -> BaseModel:
+        async with bootstrap.open_embedding_conversion(settings) as service:
+            return await service.convert_shard(command)
+
+    _run(run, admission_required=not _batch_worker(command.shard))
 
 
 @main.group("admission")

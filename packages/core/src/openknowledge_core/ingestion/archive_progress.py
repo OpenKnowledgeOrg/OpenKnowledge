@@ -193,6 +193,19 @@ class ArchiveReader:
         manifest_ref = record.manifests[0]
         return reference, manifest_ref, await self.read(manifest_ref, DatasetManifest)
 
+    async def completed_manifests(
+        self, command: DownloadDataset | DownloadDiff
+    ) -> dict[str, DatasetManifest]:
+        """Each part's manifest of a completed base or diff: base, or updates and deletes."""
+        reference = await self.reference(completion_path(command))
+        record = await self.read(reference, ArchiveCompletion)
+        await self._validate(command, reference, record)
+        parts = await self._inventory_parts(command, record.inventory)
+        return {
+            part.part or "base": await self.read(manifest, DatasetManifest)
+            for part, manifest in zip(parts, record.manifests, strict=True)
+        }
+
 
 class ArchiveProgress(ArchiveReader):
     def __init__(
