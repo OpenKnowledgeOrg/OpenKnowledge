@@ -8,7 +8,13 @@ from uuid import UUID
 from pydantic import TypeAdapter
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
-from openknowledge_adapters.clickhouse.crosswalk import XWALK_COLUMNS, expansion_sql, xwalk_select
+from openknowledge_adapters.clickhouse.crosswalk import (
+    BEST_COLUMNS,
+    XWALK_COLUMNS,
+    best_select,
+    expansion_sql,
+    xwalk_select,
+)
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_contracts.manifests import Producer
@@ -20,7 +26,6 @@ from openknowledge_core.ingestion.read_tables import (
     QUARTERLY,
     READ_TABLES,
     REBUILT_TOGETHER,
-    SOURCE_OF,
     BuildReadTablesResult,
     GroupPlan,
     GroupState,
@@ -31,7 +36,7 @@ from openknowledge_core.ingestion.read_tables import (
     quarterly_marker,
 )
 
-PAPERS, OUT, IN, XWALK = READ_TABLES
+PAPERS, OUT, IN, XWALK, BEST = READ_TABLES
 TABLES = READ_TABLES
 QUERY_ID = "citation-edges"  # Keep the recovery key stable across the rename.
 DELETE_QUERY_ID = "read-tables-delete"
@@ -40,6 +45,7 @@ COLUMNS = {
     OUT: "citing, cited, isinfluential, intents, citationid",
     IN: "citing, cited, isinfluential, intents, citationid",
     XWALK: XWALK_COLUMNS,
+    BEST: BEST_COLUMNS,
 }
 EDGES_IN = f"SELECT {COLUMNS[IN]} FROM {OUT}"
 SOURCES = {
@@ -53,6 +59,8 @@ SOURCES = {
     # One scan of citations: the incoming table is the outgoing one, sorted the other way.
     IN: f"{EDGES_IN}_new",
     XWALK: xwalk_select(None),
+    # The abstracts follow the crosswalk built just before them.
+    BEST: best_select(f"{XWALK}_new", None),
 }
 MEMORY = (
     "SETTINGS max_memory_usage = 8000000000, max_execution_time = 14400, max_insert_threads = 1"
@@ -71,12 +79,16 @@ BLOCKS = {
     IN: EDGE_BLOCKS,
     XWALK: f"{EDGE_BLOCKS}, {SPILL}",
 }
+BLOCKS[BEST] = f"{BLOCKS[PAPERS]}, {SPILL}"
 BYTES_PER_CITATION = 28
 """(4 + 4 + 5.31 + 5.31) bytes for both new copies with IDs, with 50% merge room."""
 BYTES_PER_PAPER = 100
 """Provisional free disk per papers row, pending a measured build."""
 BYTES_PER_XWALK = 40
 """Provisional free disk per papers row, pending a measured build."""
+BYTES_PER_ABSTRACT = 1000
+"""Provisional free disk per papers row, pending a measured build: at most one abstract per live
+paper, however many OpenAlex abstracts or unmerged versions the sources hold."""
 BYTES_PER_IN_ONLY = 14
 """(4 + 5.31) bytes for one new incoming copy with IDs, with 50% merge room."""
 MIN_KEPT = 0.9
@@ -97,6 +109,8 @@ SHARE_OF = {"openalex": PAPERS}
 """The table a group's touched keys are measured against, one row per key, when its own tables
 are not: ``paper_xwalk`` is empty until OpenAlex is loaded."""
 S2_SOURCES = ("papers", "citations")
+OPTIONAL = ("abstracts",)
+"""Sources that may hold no release yet; the groups they feed are skipped until they do."""
 OPENALEX = {"openalex_works": "works", "openalex_abstracts": "works-abstracts"}
 """The OpenAlex tables by the dataset that loads them."""
 KEPT_DELTA: frozenset[str] = frozenset({"openalex"})
@@ -134,12 +148,15 @@ def delta_sql(group: str, start: ReleaseId, end: ReleaseId, max_keys: int) -> li
         f"SELECT {KEY[group]} AS key FROM {source} WHERE {window}"
         for source in GROUP_SOURCES[group]
     )
+    # A paper first added as another's peer is added again once its own sources change.
     return [
-        f"CREATE TABLE IF NOT EXISTS {delta} (key UInt64) ENGINE = MergeTree ORDER BY key",
-        f"INSERT INTO {delta} SELECT DISTINCT key FROM ({sources}) "
-        f"WHERE key NOT IN (SELECT key FROM {delta}) "
+        f"CREATE TABLE IF NOT EXISTS {delta} (key UInt64, expanded Bool) "
+        "ENGINE = MergeTree ORDER BY key",
+        f"INSERT INTO {delta} (key, expanded) SELECT DISTINCT key, false FROM ({sources}) "
+        f"WHERE key NOT IN (SELECT key FROM {delta} WHERE NOT expanded) "
         f"LIMIT {max_keys + 1} {MEMORY}, max_threads = 1",
-        f"INSERT INTO {delta} {expansion_sql(delta)} {MEMORY}, {SPILL}",
+        f"INSERT INTO {delta} (key, expanded) SELECT corpusid, true FROM ({expansion_sql(delta)}) "
+        f"{MEMORY}, {SPILL}",
     ]
 
 
@@ -149,21 +166,24 @@ def apply_sql(group: str) -> list[str]:
     Deleting every delta key first makes a rerun after a partial run reach the same state.
     """
     keys = f"SELECT key FROM {DELTA[group]}"
-    touched = f"{KEY[group]} IN ({keys})"
+    # A best abstract depends on the paper's own chosen work only, so papers that merely shared
+    # a work keep their row: no later search diff would rewrite it.
+    own = {BEST: f"{keys} WHERE NOT expanded"}
     tables = GROUPS[group]
+    touched = {table: f"{KEY[group]} IN ({own.get(table, keys)})" for table in tables}
     # Waited on: until a delete finishes, the old rows still show next to the new ones.
     deletes = [
-        f"DELETE FROM {table} WHERE {touched} SETTINGS lightweight_deletes_sync = 2"
+        f"DELETE FROM {table} WHERE {touched[table]} SETTINGS lightweight_deletes_sync = 2"
         for table in tables
     ]
-    # The incoming edges come from the outgoing ones, which TABLES updates first.
+    # The incoming edges and the abstracts follow tables this run updates first.
+    special = {
+        IN: f"{EDGES_IN} WHERE {KEY[group]} IN ({keys})",
+        XWALK: xwalk_select(keys),
+        BEST: best_select(XWALK, own[BEST]),
+    }
     selects = {
-        table: f"{EDGES_IN} WHERE {touched}"
-        if table == IN
-        else xwalk_select(keys)
-        if table == XWALK
-        else f"{SOURCES[table]} AND {touched}"
-        for table in tables
+        table: special.get(table, f"{SOURCES[table]} AND {touched[table]}") for table in tables
     }
     return deletes + [
         f"INSERT INTO {table} ({COLUMNS[table]}) {selects[table]} {SETTINGS}{BLOCKS[table]}"
@@ -206,13 +226,16 @@ class ClickHouseReadTables:
     async def is_current(self, releases: Mapping[str, ReleaseId]) -> bool:
         """Whether a build would change nothing; a group it would skip is not checked."""
         live = await self._live()
+        releases = {**releases, **await self._optional()}
         openalex = await self._openalex()
-        for group in await self._groups(openalex):
+        for group in await self._groups(releases, openalex):
+            sources = GROUP_SOURCES[group]
+            expected = group_release(group, releases) if releases.keys() >= {*sources} else None
             for table in GROUPS[group]:
                 applied = await self._applied.latest(table)
                 if (
                     applied is None
-                    or applied.release != releases.get(SOURCE_OF[table])
+                    or applied.release != expected
                     or live.get(table) != applied.target_uuid
                 ):
                     return False
@@ -251,11 +274,13 @@ class ClickHouseReadTables:
                     "finish its load before building read tables"
                 )
             releases[name], uuids[name] = release, source.uuid
+        optional = await self._optional(uuids)
+        releases |= optional
         openalex = await self._openalex()
         held = {table: held_release(*found) for table, found in openalex.items()}
         if (release := held["openalex_works"]) is not None:
             releases["openalex_works"] = release
-        groups = await self._groups(openalex)
+        groups = await self._groups(releases, openalex)
         plans: dict[str, GroupPlan] = {}
         if not full:
             async with self._stage("read tables: recovery and plan"):
@@ -312,10 +337,34 @@ class ClickHouseReadTables:
         )
 
     async def _groups(
-        self, openalex: Mapping[str, tuple[TableState, AppliedRelease | None]]
+        self,
+        releases: Mapping[str, ReleaseId],
+        openalex: Mapping[str, tuple[TableState, AppliedRelease | None]],
     ) -> list[str]:
-        """The groups a build brings current: a quarterly group waits for a settled load."""
-        return [name for name in GROUPS if name not in QUARTERLY or await self._settled(openalex)]
+        """The groups a build brings current.
+
+        A group waits for its optional sources to hold a release, and a quarterly group for a
+        settled load.
+        """
+        groups: list[str] = []
+        for name in GROUPS:
+            if missing := {*GROUP_SOURCES[name]} & {*OPTIONAL} - releases.keys():
+                log.warning("%s holds no completed release; skipping %s", ", ".join(missing), name)
+            elif name not in QUARTERLY or await self._settled(openalex):
+                groups.append(name)
+        return groups
+
+    async def _optional(self, uuids: dict[str, UUID] | None = None) -> dict[str, ReleaseId]:
+        """The releases of the optional sources that hold one, adding their UUIDs to ``uuids``."""
+        found: dict[str, ReleaseId] = {}
+        for name in OPTIONAL:
+            source = await self._tables.table(name)
+            release = held_release(source, await self._applied.latest(name))
+            if release is not None:
+                found[name] = release
+                if uuids is not None:
+                    uuids[name] = source.uuid
+        return found
 
     async def _openalex(self) -> dict[str, tuple[TableState, AppliedRelease | None]]:
         found: dict[str, tuple[TableState, AppliedRelease | None]] = {}
@@ -496,10 +545,12 @@ class ClickHouseReadTables:
                         counts[IN],
                     )
                     return touched, None
+            # Dropped before the markers: a kept delta must never carry published keys into the
+            # next window, whose search diff would not rewrite them.
+            await self._client.post(f"DROP TABLE IF EXISTS {DELTA[source]}")
             await self._applied.record_all(
                 [await self._marker(table, end, start, producer, clock) for table in tables]
             )
-            await self._client.post(f"DROP TABLE IF EXISTS {DELTA[source]}")
         seconds = monotonic() - started
         return touched, {
             table: ReadTableResult(rows=written[table], seconds=seconds) for table in tables
@@ -555,6 +606,9 @@ class ClickHouseReadTables:
                 for table in reversed(swapped):
                     await self._client.post(f"EXCHANGE TABLES {table}_new AND {table}")
                 raise
+            # As in an update, a kept delta never outlives the markers of the build that used it.
+            for group in KEPT_DELTA.intersection(groups):
+                await self._client.post(f"DROP TABLE IF EXISTS {DELTA[group]}")
             markers = [
                 await self._marker(table, group_release(group, releases), None, producer, clock)
                 for group in groups
@@ -577,8 +631,6 @@ class ClickHouseReadTables:
             await self._applied.record_all(markers)
             for table in tables:
                 await self._client.post(f"DROP TABLE {table}_new SYNC")
-            for group in KEPT_DELTA.intersection(groups):
-                await self._client.post(f"DROP TABLE IF EXISTS {DELTA[group]}")
         return BuildReadTablesResult(
             source_releases=dict(releases),
             tables=results,
@@ -654,12 +706,16 @@ class ClickHouseReadTables:
         if "citations" in groups:
             await self._require_ids()
         per_row = {
-            "papers": ("papers", BYTES_PER_PAPER),
-            "citations": ("citations", BYTES_PER_CITATION),
-            "openalex": ("papers", BYTES_PER_XWALK),
+            "papers": {"papers": BYTES_PER_PAPER},
+            "citations": {"citations": BYTES_PER_CITATION},
+            "openalex": {"papers": BYTES_PER_XWALK + BYTES_PER_ABSTRACT},
         }
         await self._require_free(
-            sum(found[per_row[group][0]] * per_row[group][1] for group in groups),
+            sum(
+                found.get(source, 0) * size
+                for group in groups
+                for source, size in per_row[group].items()
+            ),
             "building read tables",
         )
         return await self._counts(*tables)
