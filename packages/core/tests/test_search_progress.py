@@ -8,8 +8,15 @@ from openknowledge_core.search.progress import Indexed, SearchState, plan_index
 SOURCES = {name: UUID(int=i) for i, name in enumerate(("papers", "abstracts", "tldrs"), 1)}
 
 
-def state(release: str = "2026-10-20") -> SearchState:
-    return SearchState(releases=dict.fromkeys(SOURCES, release), sources=SOURCES)
+def state(release: str = "2026-10-20", openalex: str | None = None) -> SearchState:
+    releases = dict.fromkeys((*SOURCES, "paper_abstract_best"), release)
+    if openalex is None:
+        return SearchState(releases=releases, sources=SOURCES)
+    return SearchState(
+        releases={**releases, "openalex_works": openalex},
+        sources={**SOURCES, "openalex_works": UUID(int=9)},
+        built_from={"openalex_works": openalex},
+    )
 
 
 def completed() -> Indexed:
@@ -81,3 +88,23 @@ def test_release_move_resumes_latest_matching_unfinished_base_then_diffs() -> No
         latest.release,
         "2026-11-10",
     )
+
+
+def test_a_new_openalex_release_builds_a_new_index() -> None:
+    old = plan_index(state(openalex="2026-10-14"), [], base_parts=4, diff_parts=4).plan
+    assert old is not None
+    done = Indexed(plan=old, kind="complete", recorded_at=datetime.now(UTC))
+    new = plan_index(state(openalex="2027-01-13"), [done], base_parts=4, diff_parts=4)
+    assert new.reason == "base" and new.plan is not None and new.plan.from_release is None
+    assert new.plan.index != done.plan.index and new.plan.openalex_release == "2027-01-13"
+
+
+def test_openalex_is_outside_the_one_release_check_but_must_have_built_the_read_table() -> None:
+    newer = state("2026-10-20", openalex="2026-10-14")
+    assert plan_index(newer, [], base_parts=4, diff_parts=4).plan is not None
+    behind = state(openalex="2027-01-13").model_copy(
+        update={"built_from": {"openalex_works": "2026-10-14"}}
+    )
+    result = plan_index(behind, [], base_parts=4, diff_parts=4)
+    assert result.plan is None
+    assert result.reason == "paper_abstract_best is not built from the loaded OpenAlex release"

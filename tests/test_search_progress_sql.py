@@ -18,7 +18,13 @@ async def test_receipts_round_trip_and_replaced_sources_need_new_applied(tmp_pat
         + """
         INSERT INTO applied (target, target_uuid, release, software_version, applied_at)
         SELECT name, uuid, '2026-10-20', 'test', now64(3) FROM system.tables
-        WHERE database = currentDatabase() AND name IN ('papers', 'abstracts', 'tldrs');
+        WHERE database = currentDatabase()
+        AND name IN ('papers', 'abstracts', 'tldrs', 'paper_abstract_best');
+        INSERT INTO applied (target, target_uuid, release, software_version, applied_at)
+        SELECT if(name = 'openalex_works', name, 'paper_abstract_best@openalex_works'), uuid,
+            '2026-10-14', 'test', now64(3)
+        FROM system.tables
+        WHERE database = currentDatabase() AND name IN ('openalex_works', 'paper_abstract_best');
         """,
         tmp_path,
     )
@@ -46,7 +52,16 @@ async def test_receipts_round_trip_and_replaced_sources_need_new_applied(tmp_pat
     )
     async with clickhouse.connect(config, transport=httpx.MockTransport(handle)) as ch:
         state = await ch.indexed.state()
-        assert set(state.releases) == {"papers", "abstracts", "tldrs"}
+        assert set(state.releases) == {
+            "papers",
+            "abstracts",
+            "tldrs",
+            "paper_abstract_best",
+            "openalex_works",
+        }
+        # The read table's own UUID is not a source: rebuilding it changes no document.
+        assert "paper_abstract_best" not in state.sources
+        assert state.built_from == {"openalex_works": "2026-10-14"}
         decision = plan_index(state, [], base_parts=2, diff_parts=2)
         assert decision.plan is not None
         receipt = Indexed(plan=decision.plan, kind="part", part=1, recorded_at=datetime.now(UTC))
@@ -58,3 +73,10 @@ async def test_receipts_round_trip_and_replaced_sources_need_new_applied(tmp_pat
         )
         assert result.returncode == 0, result.stderr
         assert "papers" not in (await ch.indexed.state()).releases
+        result = run(
+            "USE source; RENAME TABLE paper_abstract_best TO old_best; "
+            "CREATE TABLE paper_abstract_best AS old_best;",
+            tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        assert (await ch.indexed.state()).built_from == {}

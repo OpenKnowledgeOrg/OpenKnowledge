@@ -87,6 +87,7 @@ async def run_index(
                     part=part,
                     parts=plan.parts,
                     bounds=(plan.low, plan.high),
+                    openalex_release=plan.openalex_release,
                 )
             )
             await progress.record(
@@ -124,7 +125,13 @@ async def run_index(
             if interrupted:
                 raise asyncio.CancelledError
     async with execution():
-        if (await progress.state()).sources != plan.sources:
+        state = await progress.state()
+        openalex = state.releases.get("openalex_works")
+        if (state.sources, openalex, state.built_from.get("openalex_works")) != (
+            plan.sources,
+            plan.openalex_release,
+            plan.openalex_release,
+        ):
             raise SearchRejected("source tables changed during indexing; rerun for a new base")
         if plan.from_release is None:
             await service.settle(SettleIndex(index=plan.index))

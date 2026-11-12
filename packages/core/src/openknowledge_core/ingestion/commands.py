@@ -9,6 +9,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, NonNegativeInt, model
 from openknowledge_contracts.datasets import DatasetName, DiffPart, ReleaseId, ShardRef
 from openknowledge_contracts.manifests import BucketName, ObjectPath, ObjectPrefix
 from openknowledge_core.ingestion.models import AppliedRelease, ShardOutcome, check_diff
+from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 
 DEFAULT_PREFIX = "semantic-scholar"
 
@@ -214,6 +215,9 @@ class OpenAlexLoadResult(BaseModel):
     sources: LoadDatasetResult
     works: LoadDatasetResult
     abstracts: LoadDatasetResult
+    read_tables: BuildReadTablesResult | None = None
+    read_tables_failure: str | None = None
+    """Why the read-table build after the load failed; the load stays applied."""
 
 
 class BatchDiffDownloadResult(BaseModel):

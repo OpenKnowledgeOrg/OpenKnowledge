@@ -189,6 +189,13 @@ Migration 00025 adds `paper_abstract_best` to the group: one abstract per live p
 abstract when there is one (even an empty one), otherwise the non-empty abstract of the chosen
 OpenAlex work, with `source` saying which. It takes the papers and abstracts diffs and holds the
 earlier of their two releases; until abstracts holds a release, the group is skipped.
+The `openalex-load` deployment builds the read tables right after its load, and the search index
+follows each of its runs; a failed build leaves the load applied for the next sync to build from.
+`openalex-release-check` (Mondays 04:00 Europe/Zurich) archives and loads OpenAlex's release until
+both OpenAlex tables hold it, resuming a failed archive or load, and queueing behind a running
+S2 sync. Its schedule stays off until
+`OKP_OPENALEX_CHECK_SCHEDULE_ENABLED=true`: each new release downloads about 800 GB and
+reindexes every paper.
 
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.
@@ -224,9 +231,10 @@ limits. Manual `okp search index` runs use the same deployment queue and need on
 shared Prefect connection locally; search credentials and settings belong to the OpenSearch VM.
 On first installation the gate requires operator admission, as described above.
 
-Readers query the `papers` alias. When `papers`, `abstracts` and `tldrs` are applied at one
-release with matching live table UUIDs, the flow reads their latest rows into one document
-per paper. If they are not aligned, it logs why and finishes without writes. Rows can be
+Readers query the `papers` alias. When `papers`, `abstracts`, `tldrs` and the read table
+`paper_abstract_best` are applied at one release with matching live table UUIDs, and
+`paper_abstract_best` was built from the loaded OpenAlex release (if any), the flow reads their
+latest rows into one document per paper. If they are not aligned, it logs why and finishes without writes. Rows can be
 newer than the pass's release: replacing merges discard older versions, so the indexer
 always reads the latest state. The release bounds the key range and the diff's lower edge;
 new IDs above the frozen range are picked up by the next diff. A contract
@@ -236,6 +244,14 @@ refresh to its default, refreshes, and atomically switches the alias. Old indexe
 Otherwise it updates the live index by ID for IDs touched after its recorded release,
 covering missed releases in one pass, then refreshes and records the applied release.
 A current run repairs the alias if needed and does no document writes.
+
+Contract v3 takes `abstract` from `paper_abstract_best`: Semantic Scholar's abstract when it has
+a live one, else that of the paper's chosen OpenAlex work, and `abstract_source` (`s2` or
+`openalex`) says which. Each new OpenAlex release builds a new physical index, since the release
+is part of the name's fingerprint, and a pass whose OpenAlex release changes before it completes
+is refused. Every document of an index built from OpenAlex release D carries at least version
+`D * 2`, so a document never falls below a version it had. The DevTool must accept contract v3
+before the alias moves to a v3 index.
 
 `title`, `abstract` and `tldr` go through OpenSearch's `english` analyzer, which stems, so a match on `networks` finds `network`.
 `publicationdate` is a `date` in `yyyy-MM-dd` that takes range queries and sorts, and a value in another shape leaves the field unindexed but keeps the document.
