@@ -11,6 +11,7 @@ import httpx
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.config import ClickHouseConfig
+from openknowledge_adapters.clickhouse.embedding_locations import EmbeddingLocations
 from openknowledge_adapters.clickhouse.indexed import ClickHouseIndexed
 from openknowledge_adapters.clickhouse.read_tables import ClickHouseReadTables
 from openknowledge_adapters.clickhouse.search import ClickHouseSearchSource
@@ -39,6 +40,7 @@ class ClickHouse(NamedTuple):
     telemetry: ClickHouseLoadTelemetry
     search: ClickHouseSearchSource
     indexed: ClickHouseIndexed
+    locations: EmbeddingLocations
 
 
 @asynccontextmanager
@@ -78,6 +80,7 @@ async def connect(
             telemetry=ClickHouseLoadTelemetry(client),
             search=ClickHouseSearchSource(client),
             indexed=ClickHouseIndexed(client),
+            locations=EmbeddingLocations(client),
         )
 
 

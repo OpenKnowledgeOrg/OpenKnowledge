@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from openknowledge_adapters import batch, clickhouse, gcs, opensearch, semantic_scholar
 from openknowledge_adapters.clickhouse.embedding_index import write_index
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
-from openknowledge_core.embeddings import ConvertJobs, EmbeddingConversion
+from openknowledge_core.embeddings import ConvertJobs, EmbeddingConversion, EmbeddingIndexLoad
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
     LoadDatasetService,
@@ -196,6 +196,21 @@ async def open_embedding_conversion(
 ) -> AsyncGenerator[EmbeddingConversion, None]:
     async with gcs.connect(_gcs(settings)) as store:
         yield EmbeddingConversion(store, write_index)
+
+
+@asynccontextmanager
+async def open_index_load(settings: LoadSettings) -> AsyncGenerator[EmbeddingIndexLoad, None]:
+    async with (
+        gcs.connect(_gcs(settings)) as store,
+        clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
+    ):
+        yield EmbeddingIndexLoad(
+            store=store,
+            index=ch.locations,
+            applied=ch.applied,
+            producer=producer(settings),
+            clock=lambda: datetime.now(UTC),
+        )
 
 
 @asynccontextmanager

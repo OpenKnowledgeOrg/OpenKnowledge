@@ -96,16 +96,23 @@ class ClickHouseClient:
                 return
         raise error  # outside the handler, so the request with its key is not the context
 
-    async def written(self, query: str, *, query_id: str | None = None, **parameters: str) -> int:
+    async def written(
+        self,
+        query: str,
+        *,
+        data: str | bytes | None = None,
+        query_id: str | None = None,
+        **parameters: str,
+    ) -> int:
         """Run an insert and return the rows it wrote."""
-        response = await self.post(query, query_id=query_id, **parameters)
+        response = await self.post(query, data=data, query_id=query_id, **parameters)
         return int(json.loads(response.headers["X-ClickHouse-Summary"])["written_rows"])
 
     async def post(
         self,
         query: str,
         *,
-        data: str | None = None,
+        data: str | bytes | None = None,
         query_id: str | None = None,
         **parameters: str,
     ) -> httpx.Response:

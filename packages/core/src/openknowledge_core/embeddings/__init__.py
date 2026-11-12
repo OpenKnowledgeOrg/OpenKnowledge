@@ -5,6 +5,8 @@ from openknowledge_core.embeddings.commands import (
     ConvertEmbeddingShard,
     ConvertResult,
     ConvertShardResult,
+    LoadEmbeddingIndex,
+    LoadIndexResult,
 )
 from openknowledge_core.embeddings.convert import convert_shard
 from openknowledge_core.embeddings.models import (
@@ -16,8 +18,8 @@ from openknowledge_core.embeddings.models import (
     ShardPart,
     output_names,
 )
-from openknowledge_core.embeddings.ports import ConvertJobs, EmbeddingStore
-from openknowledge_core.embeddings.service import EmbeddingConversion
+from openknowledge_core.embeddings.ports import ConvertJobs, EmbeddingStore, LocationIndex
+from openknowledge_core.embeddings.service import EmbeddingConversion, EmbeddingIndexLoad
 
 __all__ = [
     "CONVERT_FAMILY",
@@ -30,8 +32,12 @@ __all__ = [
     "ConvertResult",
     "ConvertShardResult",
     "EmbeddingConversion",
+    "EmbeddingIndexLoad",
     "EmbeddingStore",
     "IndexRow",
+    "LoadEmbeddingIndex",
+    "LoadIndexResult",
+    "LocationIndex",
     "ShardPart",
     "convert_shard",
     "output_names",

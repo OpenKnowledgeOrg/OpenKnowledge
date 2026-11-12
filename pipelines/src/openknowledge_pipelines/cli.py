@@ -13,7 +13,11 @@ from uuid import UUID
 import click
 from pydantic import BaseModel, ValidationError
 
-from openknowledge_core.embeddings import ConvertEmbeddings, ConvertEmbeddingShard
+from openknowledge_core.embeddings import (
+    ConvertEmbeddings,
+    ConvertEmbeddingShard,
+    LoadEmbeddingIndex,
+)
 from openknowledge_core.ingestion import (
     DownloadDataset,
     DownloadDiff,
@@ -566,6 +570,25 @@ def convert_shard(shard: str, **options: str | None) -> None:
             return await service.convert_shard(command)
 
     _run(run, admission_required=not _batch_worker(command.shard))
+
+
+@embeddings.command(
+    "load-index", help="Load the location index of a converted base, or a whole converted diff."
+)
+@click.option("--release", required=True, help=RELEASE_HELP)
+@click.option("--from-release", help="Load this explicit diff, both parts, instead of a base.")
+@click.option("--raw-bucket", required=True, help="Bucket holding the archive.")
+@click.option("--prefix", default="semantic-scholar", show_default=True, help=PREFIX_HELP)
+@click.option("--curated-bucket", required=True, help="Bucket holding the converted files.")
+def load_index(**options: str | None) -> None:
+    command = _command(LoadEmbeddingIndex, CONVERT_RULES, **options)
+    settings = _settings(LoadSettings)
+
+    async def run() -> BaseModel:
+        async with bootstrap.open_index_load(settings) as service:
+            return await service.load(command)
+
+    _run_load(run)
 
 
 @main.group("admission")

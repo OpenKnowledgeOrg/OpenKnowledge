@@ -5,9 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
+from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_contracts.manifests import ObjectPath
 from openknowledge_core.embeddings.models import ConvertJob
-from openknowledge_core.ingestion.models import JobOutcome, StoredObject
+from openknowledge_core.ingestion.models import JobOutcome, StoredObject, TableState
 from openknowledge_core.ingestion.ports import ArtifactStore
 
 
@@ -16,6 +17,18 @@ class EmbeddingStore(ArtifactStore, Protocol):
         self, path: ObjectPath, file: Path, *, content_type: str
     ) -> StoredObject:
         """Upload a local file, replacing any object at ``path``."""
+        ...
+
+
+class LocationIndex(Protocol):
+    async def table(self) -> TableState: ...
+
+    async def load(self, release: ReleaseId, blob: str, parquet: bytes) -> int:
+        """Insert one shard's index, its papers located in ``blob``, and return the rows written."""
+        ...
+
+    async def papers(self, release: ReleaseId) -> int:
+        """The distinct papers that ``release`` located, which merges do not change."""
         ...
 
 

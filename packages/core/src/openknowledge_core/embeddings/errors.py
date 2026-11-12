@@ -9,3 +9,11 @@ class ShardInvalid(IngestionError):
 
 class ConversionFailed(IngestionError):
     """A Batch job ended with shards still unconverted."""
+
+
+class IndexIncomplete(IngestionError):
+    """Some archived shards lack their converted output, so no index loads."""
+
+
+class NoIndexLoaded(IngestionError):
+    """The location table holds no loaded release, so nothing can be located."""
