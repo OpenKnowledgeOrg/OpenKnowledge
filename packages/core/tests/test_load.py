@@ -224,6 +224,7 @@ async def test_only_a_base_load_that_passes_flags_and_records_what_the_table_hol
     applied = FakeApplied()
     tables.updates = updates
     tables.flagged = 3
+    tables.broken = 2
     tables.collapsed = 1
     tables.found = CONFLICT
     with pytest.raises(ConflictingKeys):
@@ -232,6 +233,7 @@ async def test_only_a_base_load_that_passes_flags_and_records_what_the_table_hol
     tables.collapsed = 0
     result = await load(store, tables, applied)
     assert (result.removed, tables.marked) == (removed, [RELEASE] if removed else [])
+    assert result.broken_indexes == 2
     assert [
         (found.target_uuid, found.release, found.from_release) for found in applied.records
     ] == [(tables.uuid, RELEASE, None)]

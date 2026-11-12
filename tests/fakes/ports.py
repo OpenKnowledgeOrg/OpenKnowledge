@@ -367,6 +367,7 @@ class FakeTables:
         self.found = Duplicates(identical_rows=0, conflicting_keys=0, examples=())
         self.scanned: list[str] = []
         self.flagged = 0
+        self.broken = 0
         self.marked: list[str] = []
         self.keys: set[str] = set()
 
@@ -408,6 +409,9 @@ class FakeTables:
         self.keys.add(dataset)
         rows = (count for key, count in self.rows.items() if key.startswith(f"{dataset}:"))
         return sum(rows) - self.collapsed
+
+    async def broken_indexes(self, dataset: str, release: str) -> int:
+        return self.broken
 
     async def duplicates(self, dataset: str, objects: Sequence[ObjectPath]) -> Duplicates:
         self.keys.add(dataset)

@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS openalex_abstracts
 (
     work_id UInt64,
     abstract String,
+    index_broken Bool,
     source_release Date,
     source_object LowCardinality(String),
     is_deleted UInt8,

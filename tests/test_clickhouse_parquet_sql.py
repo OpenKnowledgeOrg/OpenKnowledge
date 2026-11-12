@@ -21,6 +21,7 @@ from openknowledge_adapters.clickhouse.load_sql import (
 )
 from openknowledge_adapters.clickhouse.parquet_sql import (
     SELECTS,
+    broken_indexes_query,
     parquet_duplicates_parameters,
     parquet_duplicates_query,
     parquet_upsert_query,
@@ -275,29 +276,41 @@ def test_the_rebuilt_abstract_matches_a_python_decode(tmp_path: Path) -> None:
     assert got[4] == got[5] == got[8] == ""
 
 
+BROKEN = [
+    '{"neg":[-1]}',
+    '{"big":[4294967296]}',
+    '{"half":[1.5]}',
+    '{"a":[0],"a":[1]}',
+    '{"a":0}',
+    "[1, 2]",
+    "not json",
+    '{"empty":[]}',
+    '{"":[0]}',
+]
+
+
 @needs_clickhouse
-@pytest.mark.parametrize(
-    "bad",
-    [
-        '{"neg":[-1]}',
-        '{"big":[4294967296]}',
-        '{"half":[1.5]}',
-        '{"a":[0],"a":[1]}',
-        '{"a":0}',
-        "[1, 2]",
-        "not json",
-        '{"empty":[]}',
-        '{"":[0]}',
-    ],
-)
-def test_a_malformed_index_stops_the_insert(tmp_path: Path, bad: str) -> None:
-    write_works(tmp_path / "a.parquet", [work("https://openalex.org/W1", abstract=bad)])
-    result = run(
-        f"{up()}\n{parquet_upsert_query(WORKS_ABSTRACTS, 'file')};", tmp_path / "db",
-        **params(tmp_path / "a.parquet"),
-    )  # fmt: skip
-    assert result.returncode != 0
-    assert "openalex_abstracts: abstract_inverted_index breaks the contract" in result.stderr
+def test_a_broken_index_loads_an_empty_abstract_and_is_counted(tmp_path: Path) -> None:
+    write_works(
+        tmp_path / "a.parquet",
+        [
+            work("https://openalex.org/W1", abstract=INDEXES[2]),
+            work("https://openalex.org/W2", abstract=None),
+            *(work(f"https://openalex.org/W{10 + i}", abstract=v) for i, v in enumerate(BROKEN)),
+        ],
+    )
+    rows = load_and_select(tmp_path, WORKS_ABSTRACTS, "a.parquet")
+    flags = load_and_select(tmp_path, WORKS, "a.parquet")
+    got = {k: (r["abstract"], r["index_broken"], flags[k]["has_abstract"]) for k, r in rows.items()}
+    assert got == {
+        "1": ("the cat saw the dog", False, True),
+        "2": ("", False, False),
+        **{str(10 + i): ("", True, True) for i in range(len(BROKEN))},
+    }
+    query = broken_indexes_query(WORKS_ABSTRACTS)
+    assert query is not None and broken_indexes_query(WORKS) is None
+    (count,) = clickhouse_local(f"{query} FORMAT JSONEachRow;", tmp_path / "db", release=RELEASE)
+    assert int(count["rows"]) == len(BROKEN)
 
 
 def load(workdir: Path, contract: DatasetContract, name: str, release: str) -> None:
