@@ -76,10 +76,10 @@ def removed_query(contract: DatasetContract) -> str:
         raise ValueError(f"{contract.name}: only a snapshot contract flags removed keys")
     columns = [column.name for column in table_columns(contract) if not column.materialized]
     replaced = {"source_release": _RELEASE, REMOVED: "true"}
-    selected = ",\n    ".join(replaced.get(name, _identifier(name)) for name in columns)
-    table = _identifier(contract.table)
+    selected = ",\n    ".join(replaced.get(name, identifier(name)) for name in columns)
+    table = identifier(contract.table)
     return (
-        f"INSERT INTO {table} ({', '.join(_identifier(name) for name in columns)})\n"
+        f"INSERT INTO {table} ({', '.join(identifier(name) for name in columns)})\n"
         f"SELECT\n    {selected}\n"
         f"FROM {table} FINAL\n"
         f"WHERE source_release < {_RELEASE} AND NOT {REMOVED}"
@@ -93,7 +93,7 @@ def problems_query(contract: DatasetContract, source: Source = "s3") -> str:
     checks = query.record(fields, required=[f.name for f in fields if not f.nullable])
     checks += [query.field(field, _raw(field.name)) for field in fields]
     branches = ",\n        ".join(
-        f"NOT ({condition}), {_literal(message)}" for condition, message in checks
+        f"NOT ({condition}), {literal(message)}" for condition, message in checks
     )
     return (
         f"SELECT line, problem FROM (\n{_with(fields)}"
@@ -227,14 +227,13 @@ class _Query:
             return f"arrayMap({variable} -> {value}, JSONExtractArrayRaw({raw}))"
         if isinstance(type_, pa.StructType):
             values = [
-                self.value(f, f"JSONExtractRaw({raw}, {_literal(f.name)})")
-                for f in fields_of(type_)
+                self.value(f, f"JSONExtractRaw({raw}, {literal(f.name)})") for f in fields_of(type_)
             ]
             return f"tuple({', '.join(values)})"
         if isinstance(type_, pa.JsonType):
             return f"if(JSONType({raw}) = 'Null', NULL, {raw})" if field.nullable else raw
         name = _TYPES[_scalar(type_)]
-        return f"JSONExtract({raw}, {_literal(f'Nullable({name})' if field.nullable else name)})"
+        return f"JSONExtract({raw}, {literal(f'Nullable({name})' if field.nullable else name)})"
 
     def _check(self, field: ArrowField, raw: str, path: str) -> str:
         condition = self._typed(field.type, raw, path)
@@ -294,7 +293,7 @@ class _Query:
         if required:
             parts.append(f"hasAll({keys}, {_array(required)})")
         for field in fields:
-            nested = f"JSONExtractRaw({raw}, {_literal(field.name)})"
+            nested = f"JSONExtractRaw({raw}, {literal(field.name)})"
             parts.append(self._check(field, nested, f"{path}.{field.name}"))
         return " AND ".join(parts)
 
@@ -323,7 +322,7 @@ def _load(
     for field in fields:
         checks.append(query.field(field, _raw(field.name)))
         values += _stored(query, field)
-    values += _provenance(is_deleted)
+    values += provenance(is_deleted)
     return _insert(contract, fields, values, checks, source)
 
 
@@ -334,13 +333,13 @@ def _insert(
     checks: Sequence[Check],
     source: Source,
 ) -> str:
-    columns = ", ".join(_identifier(name) for name, _ in values)
+    columns = ", ".join(identifier(name) for name, _ in values)
     selected = ",\n    ".join(expression for _, expression in values)
     where = "\n    AND ".join(
-        f"NOT throwIf(NOT ({condition}), {_literal(message)})" for condition, message in checks
+        f"NOT throwIf(NOT ({condition}), {literal(message)})" for condition, message in checks
     )
     return (
-        f"INSERT INTO {_identifier(contract.table)} ({columns})\n"
+        f"INSERT INTO {identifier(contract.table)} ({columns})\n"
         # Refuse an unmigrated destination rather than checkpointing coerced NULLs.
         "SETTINGS insert_null_as_default = 0\n"
         f"{_with(fields)}"
@@ -352,7 +351,7 @@ def _insert(
 
 def _with(fields: Sequence[ArrowField]) -> str:
     raws = ",\n    ".join(
-        f"JSONExtractRaw(line, {_literal(f.name)}) AS {_raw(f.name)}" for f in fields
+        f"JSONExtractRaw(line, {literal(f.name)}) AS {_raw(f.name)}" for f in fields
     )
     return f"WITH\n    {raws}\n"
 
@@ -377,7 +376,7 @@ def _source(source: Source, parameter: str = "source_file") -> str:
     return f"file({name}, 'LineAsString', 'line String', 'gzip')"
 
 
-def _provenance(is_deleted: int) -> list[tuple[str, str]]:
+def provenance(is_deleted: int) -> list[tuple[str, str]]:
     values = {
         "source_release": _RELEASE,
         "source_object": "{source_object:String}",
@@ -405,13 +404,13 @@ def _raw(name: str) -> str:
     return f"raw_{name}"
 
 
-def _identifier(name: str) -> str:
+def identifier(name: str) -> str:
     return "`" + name.replace("\\", "\\\\").replace("`", "\\`") + "`"
 
 
-def _literal(text: str) -> str:
+def literal(text: str) -> str:
     return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def _array(names: Iterable[str]) -> str:
-    return "[" + ", ".join(_literal(name) for name in names) + "]"
+    return "[" + ", ".join(literal(name) for name in names) + "]"

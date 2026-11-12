@@ -165,13 +165,16 @@ def download_flow(service: DownloadDatasetService, settings: PipelineSettings) -
     )
 
 
-def load_flows(service: LoadDatasetService, settings: LoadSettings) -> S2LoadFlows:
+def load_flows(
+    service: LoadDatasetService, settings: LoadSettings, *, parallelism: int = 1
+) -> S2LoadFlows:
     from openknowledge_pipelines.flows.s2_load import s2_load_flows
 
     return s2_load_flows(
         service,
         task_retries=settings.task_retries,
         retry_delay_seconds=settings.task_retry_delay_seconds,
+        parallelism=parallelism,
     )
 
 

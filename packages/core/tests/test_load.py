@@ -39,6 +39,7 @@ from tests.fakes.ports import (
     FakeTables,
     clock,
     gz,
+    parquet,
 )
 
 LOAD = LoadDataset(**COMMAND.model_dump())
@@ -223,6 +224,7 @@ async def test_only_a_base_load_that_passes_flags_and_records_what_the_table_hol
     applied = FakeApplied()
     tables.updates = updates
     tables.flagged = 3
+    tables.broken = 2
     tables.collapsed = 1
     tables.found = CONFLICT
     with pytest.raises(ConflictingKeys):
@@ -231,6 +233,7 @@ async def test_only_a_base_load_that_passes_flags_and_records_what_the_table_hol
     tables.collapsed = 0
     result = await load(store, tables, applied)
     assert (result.removed, tables.marked) == (removed, [RELEASE] if removed else [])
+    assert result.broken_indexes == 2
     assert [
         (found.target_uuid, found.release, found.from_release) for found in applied.records
     ] == [(tables.uuid, RELEASE, None)]
@@ -322,7 +325,7 @@ async def test_conflicting_keys_in_the_update_files_fail_the_diff(
 
 async def test_a_contract_reads_the_manifest_of_its_archived_dataset(store: FakeStore) -> None:
     object_path = ObjectPath.under("raw", "openalex", RELEASE, "works", "part-0.parquet")
-    data = gz(b'{"id": 1}\n')
+    data = parquet(1)
     entry = ManifestEntry(
         object_ref=ObjectRef(path=object_path, generation=store.put(object_path, data)),
         size=len(data),

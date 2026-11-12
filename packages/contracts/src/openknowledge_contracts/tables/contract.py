@@ -3,6 +3,8 @@
 The source schema mirrors one record as the provider delivers it, field for field. Nothing is
 renamed, cast or dropped, so a record that does not fit is news, not noise. Arrow lets unknown
 keys and nulls in required fields through, so a load refuses both itself, at every depth.
+A contract over a typed format such as Parquet describes the stored projection instead, and
+its load derives each column from the delivered ones.
 
 A load writes the source fields and three provenance columns:
 

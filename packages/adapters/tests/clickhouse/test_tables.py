@@ -5,7 +5,11 @@ import httpx
 import pytest
 
 from openknowledge_adapters import clickhouse
+from openknowledge_adapters.clickhouse.load_sql import sql_sha256
+from openknowledge_adapters.clickhouse.parquet_sql import parquet_upsert_query
+from openknowledge_contracts.manifests import ObjectPath, ObjectRef
 from openknowledge_contracts.tables.clickhouse import version_expression
+from openknowledge_contracts.tables.openalex import WORKS_ABSTRACTS
 from openknowledge_contracts.tables.s2 import CITATIONS
 from openknowledge_core.ingestion import LoadDataset, LoadDatasetService
 from openknowledge_core.ingestion.errors import (
@@ -15,6 +19,7 @@ from openknowledge_core.ingestion.errors import (
     TableRejected,
     TableUnavailable,
 )
+from openknowledge_core.ingestion.models import LoadObject
 from tests.fakes.ports import PRODUCER, FakeApplied, FakeStore, clock
 
 CONFIG = clickhouse.ClickHouseConfig.model_validate(
@@ -122,3 +127,47 @@ async def test_applied_took_and_rebased_match_target_uuid_and_releases(found: bo
     async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
         assert await ch.applied.took("papers", target_uuid, "2026-10-06") is found
         assert await ch.applied.rebased("papers", target_uuid, "2026-10-06", "2026-10-13") is found
+
+
+async def test_abstracts_load_from_the_archived_works_parquet() -> None:
+    queries: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        queries.append(request.content.decode())
+        if "system.tables" in queries[-1]:
+            row = {"uuid": "00000000-0000-0000-0000-000000000001", "total_rows": 0}
+            return httpx.Response(200, text=json.dumps(row))
+        return httpx.Response(200, headers={"X-ClickHouse-Summary": '{"written_rows": "2"}'})
+
+    path = ObjectPath(
+        bucket="raw", name="openalex/2026-10-14/works/updated_date=2026-10-14/part_0000.parquet"
+    )
+    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
+        table = await ch.tables.table("works-abstracts")
+        written = await ch.tables.load(
+            LoadObject(
+                dataset="works-abstracts",
+                release="2026-10-14",
+                object_ref=ObjectRef(path=path, generation=1),
+            )
+        )
+    assert (table.archive, table.name, written) == ("works", "openalex_abstracts", 2)
+    assert table.load_sql_sha256 == sql_sha256(parquet_upsert_query(WORKS_ABSTRACTS))
+    assert queries[-1] == parquet_upsert_query(WORKS_ABSTRACTS)
+
+
+async def test_a_retried_parquet_duplicates_check_keeps_its_query_id() -> None:
+    ids: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        ids.append(request.url.params["query_id"])
+        row: dict[str, object] = {"identical_rows": 1, "conflicting_keys": 0, "examples": []}
+        return httpx.Response(200, text=json.dumps(row))
+
+    paths = [
+        ObjectPath(bucket="raw", name=f"openalex/2026-10-14/works/part_{i}.parquet") for i in (0, 1)
+    ]
+    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
+        for _ in range(2):
+            await ch.tables.duplicates("works", paths)
+    assert ids[0] == ids[1]

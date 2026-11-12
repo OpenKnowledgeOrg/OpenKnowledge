@@ -358,7 +358,7 @@ class FakeTables:
         self.uuid = UUID(int=1)
         self.updates: UpdateMode = "diffs"
         self.rows: dict[str, int] = {}
-        self.records: dict[str, LoadRecord] = {}
+        self.records: dict[tuple[str, str], LoadRecord] = {}
         self.loads: list[str] = []
         self.operations: list[Operation] = []
         self.failures: list[IngestionError] = []
@@ -367,6 +367,7 @@ class FakeTables:
         self.found = Duplicates(identical_rows=0, conflicting_keys=0, examples=())
         self.scanned: list[str] = []
         self.flagged = 0
+        self.broken = 0
         self.marked: list[str] = []
         self.keys: set[str] = set()
 
@@ -384,7 +385,7 @@ class FakeTables:
 
     async def loaded(self, dataset: str, source_object: ObjectPath) -> LoadRecord | None:
         self.keys.add(dataset)
-        return self.records.get(str(source_object))
+        return self.records.get((dataset, str(source_object)))
 
     async def load(self, request: LoadObject) -> int:
         self.keys.add(request.dataset)
@@ -393,16 +394,24 @@ class FakeTables:
         self.operations.append(request.operation)
         if self.failures:
             raise self.failures.pop(0)
-        lines = gzip.decompress(self.store.data(path)).count(b"\n")
-        self.rows[str(path)] = lines - self.short_by
-        return self.rows[str(path)]
+        data = self.store.data(path)
+        if path.name.endswith(".parquet"):
+            rows = pq.read_metadata(pa.BufferReader(data)).num_rows  # pyright: ignore[reportUnknownMemberType]
+        else:
+            rows = gzip.decompress(data).count(b"\n")
+        self.rows[f"{request.dataset}:{path}"] = rows - self.short_by
+        return self.rows[f"{request.dataset}:{path}"]
 
     async def record(self, record: LoadRecord) -> None:
-        self.records[record.source_object] = record
+        self.records[(record.target, record.source_object)] = record
 
     async def live_rows(self, dataset: str, release: str) -> int:
         self.keys.add(dataset)
-        return sum(self.rows.values()) - self.collapsed
+        rows = (count for key, count in self.rows.items() if key.startswith(f"{dataset}:"))
+        return sum(rows) - self.collapsed
+
+    async def broken_indexes(self, dataset: str, release: str) -> int:
+        return self.broken
 
     async def duplicates(self, dataset: str, objects: Sequence[ObjectPath]) -> Duplicates:
         self.keys.add(dataset)

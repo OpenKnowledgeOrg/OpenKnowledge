@@ -63,6 +63,8 @@ class LoadSettings(CommonSettings):
     drop more rows than a full rebuild is allowed to."""
     read_tables_max_delta_keys: PositiveInt = 100_000_000
     """Diffs touching more keys than this rebuild in full, since an update holds them in memory."""
+    openalex_load_parallelism: int = Field(1, ge=1, le=8)
+    """OpenAlex objects inserted at once; one insert must fit the memory limit beside the others."""
 
 
 class WatchdogSettings(LoadSettings):

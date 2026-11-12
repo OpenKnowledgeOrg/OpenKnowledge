@@ -8,7 +8,7 @@ again and the table keeps one row per key and version.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 
 from openknowledge_contracts.datasets import (
@@ -21,6 +21,7 @@ from openknowledge_contracts.datasets import (
     ReleaseId,
 )
 from openknowledge_contracts.manifests import DatasetManifest, ManifestEntry, ObjectPath, Producer
+from openknowledge_contracts.sources import SourceName, contract_for
 from openknowledge_core.ingestion.commands import (
     LoadDataset,
     LoadDatasetResult,
@@ -56,7 +57,10 @@ from openknowledge_core.ingestion.ports import (
 )
 from openknowledge_core.ingestion.service import DOCUMENT_LIMIT, read_small
 
-BASE_HINT = "run okp s2 download first"
+BASE_HINTS: Mapping[SourceName, str] = {
+    "semantic-scholar": "run okp s2 download first",
+    "openalex": "run okp openalex archive first",
+}
 DIFF_HINT = "run s2-batch-download-diff first"
 
 
@@ -92,7 +96,8 @@ class LoadDatasetService:
         path = dataset_file_path(
             command.bucket, command.prefix, command.release, table.archive, MANIFEST_NAME
         )
-        manifest = await self._manifest(path, command.release, table.archive, BASE_HINT)
+        hint = BASE_HINTS[contract_for(table.dataset)[0].name]
+        manifest = await self._manifest(path, command.release, table.archive, hint)
         prepared = PreparedLoad(manifest_path=path, manifest=manifest, table=table)
         if self._observer is not None:
             await self._observer.planned(prepared)
@@ -203,6 +208,7 @@ class LoadDatasetService:
         manifest, table = prepared.manifest, prepared.table
         records = _record_count(prepared)
         live = await self._tables.live_rows(table.dataset, manifest.release_id)
+        broken = await self._tables.broken_indexes(table.dataset, manifest.release_id)
         duplicates = (
             Duplicates(identical_rows=0, conflicting_keys=0, examples=())
             if live == records
@@ -224,6 +230,7 @@ class LoadDatasetService:
             identical_duplicates=duplicates.identical_rows,
             enriched_duplicates=duplicates.enriched_rows,
             removed=removed,
+            broken_indexes=broken,
             manifest=prepared.manifest_path,
         )
 
