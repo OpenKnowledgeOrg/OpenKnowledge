@@ -48,7 +48,9 @@ async def completed(
     )
     pinned = await service.pin_dataset(command)
     await service.archive_shard(pinned, pinned.shards[0])
-    await ArchiveProgress(store, service, PRODUCER, clock).finalize(command)
+    await ArchiveProgress(store, service, PRODUCER, clock, SOURCES["semantic-scholar"]).finalize(
+        command
+    )
 
 
 class TrackedStore(FakeStore):
@@ -88,7 +90,9 @@ async def test_completed_base_streams_with_lineage_and_closes_early(
     data = gz((json.dumps(payload) + "\n").encode()) * 20
     await completed(command, store, data)
     before = dict(store.objects)
-    async with aclosing(ArchiveConsumer(store).stream(command)) as stream:
+    async with aclosing(
+        ArchiveConsumer(store, SOURCES["semantic-scholar"]).stream(command)
+    ) as stream:
         row = await anext(stream)
         assert row.paper.corpusid == payload["corpusid"]
         assert row.source.dataset == dataset and row.source.release == command.release
@@ -100,18 +104,23 @@ async def test_completed_base_streams_with_lineage_and_closes_early(
     assert store.objects == before
     # Exhaustion exercises the original integrity check across all concatenated members.
     whole = command.model_copy(update={"max_records": None})
-    assert len([row async for row in ArchiveConsumer(store).stream(whole)]) == 20
+    assert (
+        len(
+            [row async for row in ArchiveConsumer(store, SOURCES["semantic-scholar"]).stream(whole)]
+        )
+        == 20
+    )
 
 
 async def test_completion_gate_and_malformed_payload_cleanup() -> None:
     store = TrackedStore()
     command = ConsumeBase(dataset="s2orc_v2", release="2026-10-06", bucket="raw")
     with pytest.raises(IngestionError, match="missing archive object"):
-        await anext(ArchiveConsumer(store).stream(command))
+        await anext(ArchiveConsumer(store, SOURCES["semantic-scholar"]).stream(command))
     assert store.payload_chunks == 0
     await completed(command, store, gz(b'{"corpusid":1,"body":null}\n'))
     with pytest.raises(IngestionError, match="line 1.*body"):
-        await anext(ArchiveConsumer(store).stream(command))
+        await anext(ArchiveConsumer(store, SOURCES["semantic-scholar"]).stream(command))
     assert store.closed == 1
 
 
@@ -121,12 +130,16 @@ async def test_record_bound_and_cancelled_consumer_release_stream() -> None:
     await completed(command, store, gz((json.dumps(FULLTEXT) + "\n").encode()))
     with pytest.raises(IngestionError, match="max_record_bytes=10"):
         await anext(
-            ArchiveConsumer(store).stream(command.model_copy(update={"max_record_bytes": 10}))
+            ArchiveConsumer(store, SOURCES["semantic-scholar"]).stream(
+                command.model_copy(update={"max_record_bytes": 10})
+            )
         )
     entered = asyncio.Event()
 
     async def consume() -> None:
-        async with aclosing(ArchiveConsumer(store).stream(command)) as stream:
+        async with aclosing(
+            ArchiveConsumer(store, SOURCES["semantic-scholar"]).stream(command)
+        ) as stream:
             await anext(stream)
             entered.set()
             await asyncio.Event().wait()

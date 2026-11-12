@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 
-from prefect import flow
+from prefect import flow, get_run_logger
 from prefect import serve as prefect_serve
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.actions import DeploymentScheduleCreate, GlobalConcurrencyLimitCreate
@@ -18,7 +18,10 @@ from prefect.deployments.runner import RunnerDeployment
 from prefect.exceptions import ObjectNotFound
 from prefect.types.entrypoint import EntrypointType
 
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
+    ArchiveRelease,
+    ArchiveReleaseResult,
     BatchDiffDownloadResult,
     BatchDownloadResult,
     DownloadDataset,
@@ -30,7 +33,7 @@ from openknowledge_core.ingestion import (
     WatchdogResult,
 )
 from openknowledge_core.ingestion.coordinator import SyncResult
-from openknowledge_core.ingestion.errors import IngestionError
+from openknowledge_core.ingestion.errors import DatasetNotInRelease, IngestionError
 from openknowledge_core.ingestion.families import ArchiveFamily, require_family
 from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 from openknowledge_pipelines import admission, bootstrap
@@ -39,6 +42,7 @@ from openknowledge_pipelines.flows.sync_observability import SyncObservation
 from openknowledge_pipelines.settings import (
     BatchSettings,
     LoadSettings,
+    OpenAlexBatchSettings,
     ScheduleSettings,
     SyncSettings,
     WatchdogSettings,
@@ -49,15 +53,25 @@ DEPLOYMENT = "control-vm"
 # for loads and the watchdog; deployment queues alone do not reserve runner capacity.
 RUNS_AT_ONCE = 3
 S2_LIMIT = "semantic-scholar"
+OPENALEX_LIMIT = "openalex"
 LOAD_LIMIT = "clickhouse"
 WATCHDOG_CRON = "0 */6 * * *"
 
 
 def one_s2_user() -> AbstractAsyncContextManager[None]:
+    return _one_user(S2_LIMIT)
+
+
+def one_openalex_archiver() -> AbstractAsyncContextManager[None]:
+    """Held through recovery and download, since recovery deletes every queued OpenAlex job."""
+    return _one_user(OPENALEX_LIMIT)
+
+
+def _one_user(limit: str) -> AbstractAsyncContextManager[None]:
     # Keep supervising existing Batch work if global lease renewal fails; deployment
     # leases can still cancel runs. Busy refusals fail and trigger run_failed alerts.
     return concurrency(
-        S2_LIMIT,
+        limit,
         strict=True,
         max_retries=0,
         raise_on_lease_renewal_failure=False,
@@ -188,6 +202,59 @@ async def s2_batch_download_embeddings_diff(command: DownloadDiff) -> BatchDiffD
     return await _download_diff(command, ArchiveFamily.EMBEDDINGS)
 
 
+@flow(name="openalex-batch-download", persist_result=False)
+async def openalex_batch_download(command: ArchiveRelease) -> ArchiveReleaseResult:
+    """Archive one release, what the load reads first, under its own limit apart from S2's.
+
+    A dataset that fails does not stop the ones after it; the run fails at the end, naming
+    each. A registered dataset the release does not list is skipped unless it was asked for.
+    """
+    datasets = openalex_datasets(command)
+    settings = OpenAlexBatchSettings()  # pyright: ignore[reportCallIssue]
+    async with (
+        one_openalex_archiver(),
+        admission.execution(),
+        bootstrap.open_openalex_download(settings) as (service, jobs),
+    ):
+        flows = bootstrap.batch_download_flows(service, jobs, settings, ArchiveFamily.OPENALEX)
+        results: list[BatchDownloadResult] = []
+        failed: list[str] = []
+        for dataset in datasets:
+            download = DownloadDataset(
+                release=command.release,
+                dataset=dataset,
+                bucket=command.bucket,
+                prefix=command.prefix,
+            )
+            try:
+                results.append(await flows.dataset.fn(download))
+            except DatasetNotInRelease as exc:
+                if command.dataset is not None:
+                    raise
+                get_run_logger().warning("%s; skipped", exc)
+            except IngestionError as exc:
+                failed.append(f"{dataset} ({type(exc).__name__}: {exc})")
+        if failed:
+            raise IngestionError(
+                f"release {command.release} of OpenAlex: {len(failed)} datasets failed, the others "
+                f"are archived; rerun to resume: {'; '.join(failed)}"
+            )
+        return ArchiveReleaseResult(release_id=command.release, datasets=tuple(results))
+
+
+# What okp openalex load reads, archived before the other datasets.
+_LOADED_FIRST = ("works", "sources", "works-deleted")
+
+
+def openalex_datasets(command: ArchiveRelease) -> tuple[str, ...]:
+    """The datasets to archive: the one asked for, else every registered one, loaded ones first."""
+    if command.dataset is not None:
+        require_family(command.dataset, ArchiveFamily.OPENALEX)
+        return (command.dataset,)
+    names = SOURCES["openalex"].datasets
+    return (*_LOADED_FIRST, *(name for name in names if name not in _LOADED_FIRST))
+
+
 @flow(name="s2-sync", persist_result=False, retries=0)
 async def s2_sync() -> SyncResult:
     settings = SyncSettings()  # pyright: ignore[reportCallIssue]
@@ -240,7 +307,7 @@ async def watchdog() -> WatchdogResult:
 def ensure_limits() -> None:
     """Create the global limits the flows take, since a strict limit must exist before a run."""
     with get_client(sync_client=True) as client:
-        for name in (S2_LIMIT, LOAD_LIMIT):
+        for name in (S2_LIMIT, OPENALEX_LIMIT, LOAD_LIMIT):
             try:
                 client.read_global_concurrency_limit_by_name(name)
             except ObjectNotFound:
@@ -276,7 +343,8 @@ def serve() -> None:
             concurrency_limit=1,
         ),
         # Each download deployment queues its own runs. All six compete for S2_LIMIT; busy
-        # runs fail promptly so they do not occupy runner slots while waiting globally.
+        # runs fail promptly so they do not occupy runner slots while waiting globally. The
+        # OpenAlex archive takes OPENALEX_LIMIT, so it and an S2 sync never block each other.
         *(
             RunnerDeployment.from_flow(
                 download,
@@ -292,6 +360,12 @@ def serve() -> None:
                 s2_batch_download_embeddings,
                 s2_batch_download_embeddings_diff,
             )
+        ),
+        RunnerDeployment.from_flow(
+            openalex_batch_download,
+            DEPLOYMENT,
+            entrypoint_type=EntrypointType.MODULE_PATH,
+            concurrency_limit=1,
         ),
         # Every 6 hours, for a log alert; it needs no S2 key, so it takes no limit.
         RunnerDeployment.from_flow(

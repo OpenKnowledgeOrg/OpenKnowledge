@@ -24,7 +24,13 @@ from openknowledge_core.ingestion.errors import (
     SourceRejected,
     SourceUnavailable,
 )
-from openknowledge_core.ingestion.models import DatasetListing, DiffChain, DiffListing, ShardLink
+from openknowledge_core.ingestion.models import (
+    DatasetListing,
+    DiffChain,
+    DiffListing,
+    ReleaseDocument,
+    ShardLink,
+)
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +106,9 @@ class SemanticScholarCatalog:
             f"the metadata Semantic Scholar sent for {about} has missing or malformed fields; "
             f"{AGAIN}"
         )
+
+    async def release_documents(self, release_id: ReleaseId) -> tuple[ReleaseDocument, ...]:
+        return ()
 
     async def list_dataset(self, release_id: ReleaseId, dataset: DatasetName) -> DatasetListing:
         about = f"dataset {dataset} in release {release_id}"

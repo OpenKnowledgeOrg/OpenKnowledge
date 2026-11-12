@@ -10,7 +10,7 @@ from functools import partial
 from importlib.metadata import version
 from typing import TYPE_CHECKING
 
-from openknowledge_adapters import batch, clickhouse, gcs, opensearch, semantic_scholar
+from openknowledge_adapters import batch, clickhouse, gcs, openalex, opensearch, semantic_scholar
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
 from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
@@ -29,9 +29,12 @@ from openknowledge_core.ingestion.ports import LoadTelemetry, ReadTables
 from openknowledge_core.search import IndexPapers, SearchIndexService
 from openknowledge_core.search.commands import IndexPapersResult
 from openknowledge_pipelines.settings import (
+    BatchJobSettings,
     BatchSettings,
     CommonSettings,
     LoadSettings,
+    OpenAlexBatchSettings,
+    OpenAlexSettings,
     PipelineSettings,
     SearchSettings,
     SyncSettings,
@@ -67,6 +70,27 @@ async def open_service(settings: PipelineSettings) -> AsyncGenerator[DownloadDat
             producer=producer(settings),
             clock=lambda: datetime.now(UTC),
             source=SOURCES["semantic-scholar"],
+        )
+
+
+@asynccontextmanager
+async def open_openalex_service(
+    settings: OpenAlexSettings,
+) -> AsyncGenerator[DownloadDatasetService, None]:
+    config = openalex.OpenAlexConfig(
+        base_url=settings.openalex_base_url,
+        timeout_seconds=settings.openalex_timeout_seconds,
+        download_connect_timeout_seconds=settings.download_connect_timeout_seconds,
+        download_read_timeout_seconds=settings.download_read_timeout_seconds,
+    )
+    async with openalex.connect(config) as oa, gcs.connect(_gcs(settings)) as store:
+        yield DownloadDatasetService(
+            catalog=oa.catalog,
+            downloads=oa.downloads,
+            store=store,
+            producer=producer(settings),
+            clock=lambda: datetime.now(UTC),
+            source=SOURCES["openalex"],
         )
 
 
@@ -166,7 +190,28 @@ def watchdog_flow(service: WatchdogService, settings: WatchdogSettings) -> Watch
 async def open_batch_download(
     settings: BatchSettings,
 ) -> AsyncGenerator[tuple[DownloadDatasetService, ShardJobs], None]:
-    config = batch.BatchConfig(
+    config = _batch_config(
+        settings,
+        parallelism=settings.batch_parallelism,
+        secrets={"S2_API_KEY": settings.batch_s2_key_secret},
+    )
+    async with open_service(settings) as service, batch.connect(config) as jobs:
+        yield service, jobs
+
+
+@asynccontextmanager
+async def open_openalex_download(
+    settings: OpenAlexBatchSettings,
+) -> AsyncGenerator[tuple[DownloadDatasetService, ShardJobs], None]:
+    config = _batch_config(settings, parallelism=settings.batch_openalex_parallelism, secrets={})
+    async with open_openalex_service(settings) as service, batch.connect(config) as jobs:
+        yield service, jobs
+
+
+def _batch_config(
+    settings: BatchJobSettings, *, parallelism: int, secrets: dict[str, str]
+) -> batch.BatchConfig:
+    return batch.BatchConfig(
         project=settings.batch_project,
         region=settings.batch_region,
         service_account=settings.batch_service_account,
@@ -174,22 +219,20 @@ async def open_batch_download(
         subnetwork=settings.batch_subnetwork,
         image=f"{settings.batch_image_repository}@{settings.image_digest}",
         machine_type=settings.batch_machine_type,
-        parallelism=settings.batch_parallelism,
+        parallelism=parallelism,
         provisioning_model=settings.batch_provisioning_model,
         max_run_seconds=settings.batch_max_run_seconds,
         poll_seconds=settings.batch_poll_seconds,
         wait_timeout_seconds=settings.batch_wait_timeout_seconds,
         environment={"OKP_IMAGE_DIGEST": settings.image_digest},
-        secrets={"S2_API_KEY": settings.batch_s2_key_secret},
+        secrets=secrets,
     )
-    async with open_service(settings) as service, batch.connect(config) as jobs:
-        yield service, jobs
 
 
 def batch_download_flows(
     service: DownloadDatasetService,
     jobs: ShardJobs,
-    settings: BatchSettings,
+    settings: BatchJobSettings,
     family: ArchiveFamily = ArchiveFamily.CORE,
 ) -> S2BatchDownloadFlows:
     from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flows
@@ -209,7 +252,13 @@ async def open_archive_progress(
     settings: PipelineSettings,
 ) -> AsyncGenerator[ArchiveProgress, None]:
     async with open_service(settings) as service, gcs.connect(_gcs(settings)) as store:
-        yield ArchiveProgress(store, service, producer(settings), lambda: datetime.now(UTC))
+        yield ArchiveProgress(
+            store,
+            service,
+            producer(settings),
+            lambda: datetime.now(UTC),
+            SOURCES["semantic-scholar"],
+        )
 
 
 @asynccontextmanager
@@ -229,7 +278,13 @@ async def open_sync(
         clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
         open_read_tables(settings, stage=read_table_stage) as edges,
     ):
-        progress = ArchiveProgress(store, service, producer(settings), lambda: datetime.now(UTC))
+        progress = ArchiveProgress(
+            store,
+            service,
+            producer(settings),
+            lambda: datetime.now(UTC),
+            SOURCES["semantic-scholar"],
+        )
         loader = LoadDatasetService(
             store=store,
             tables=ch.tables,
@@ -244,7 +299,9 @@ async def open_sync(
             applied=ch.applied,
             progress=progress,
             downloads={
-                dataset: batch_download_flows(service, jobs, settings, archive_family(dataset))
+                dataset: batch_download_flows(
+                    service, jobs, settings, archive_family(dataset, "semantic-scholar")
+                )
                 for dataset in (*CORE_ORDER, *LARGE_ORDER)
             },
             loads=load_flows(loader, settings),
@@ -258,7 +315,7 @@ async def open_sync(
 @asynccontextmanager
 async def open_archive_consumer(settings: CommonSettings) -> AsyncGenerator[ArchiveConsumer]:
     async with gcs.connect(_gcs(settings)) as store:
-        yield ArchiveConsumer(store)
+        yield ArchiveConsumer(store, SOURCES["semantic-scholar"])
 
 
 @asynccontextmanager

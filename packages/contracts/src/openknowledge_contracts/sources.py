@@ -40,6 +40,31 @@ class Source:
 
 _S2_DATASETS = (*S2_CONTRACTS, "s2orc_v2", "embeddings-specter_v2")
 
+# Every entity of the OpenAlex manifest is archived, since only its latest release stays online.
+_OPENALEX_ENTITIES = (
+    "works",
+    "authors",
+    "institutions",
+    "sources",
+    "publishers",
+    "funders",
+    "topics",
+    "subfields",
+    "fields",
+    "domains",
+    "concepts",
+    "keywords",
+    "awards",
+    "continents",
+    "countries",
+    "institution-types",
+    "languages",
+    "licenses",
+    "sdgs",
+    "source-types",
+    "work-types",
+)
+
 SOURCES: Mapping[SourceName, Source] = MappingProxyType(
     {
         "semantic-scholar": Source(
@@ -47,6 +72,15 @@ SOURCES: Mapping[SourceName, Source] = MappingProxyType(
             prefix="semantic-scholar",
             datasets=MappingProxyType({name: ArchivedDataset("jsonl-gz") for name in _S2_DATASETS}),
             contracts=S2_CONTRACTS,
+        ),
+        "openalex": Source(
+            name="openalex",
+            prefix="openalex",
+            datasets=MappingProxyType(
+                {name: ArchivedDataset("parquet", folders=1) for name in _OPENALEX_ENTITIES}
+                | {"works-deleted": ArchivedDataset("jsonl-gz")}
+            ),
+            contracts=MappingProxyType({}),
         ),
     }
 )

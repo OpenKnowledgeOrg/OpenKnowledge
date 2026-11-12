@@ -22,6 +22,7 @@ from openknowledge_core.ingestion.models import (
     LoadObject,
     LoadRecord,
     PreparedLoad,
+    ReleaseDocument,
     ShardJob,
     ShardLink,
     StoredObject,
@@ -35,6 +36,10 @@ class ReleaseCatalog(Protocol):
 
     async def resolve_release(self, selector: ReleaseId | Literal["latest"]) -> ReleaseMetadata:
         """Resolves ``latest`` to the explicit release id it stands for."""
+        ...
+
+    async def release_documents(self, release_id: ReleaseId) -> tuple[ReleaseDocument, ...]:
+        """Files the source publishes about the release itself, to be archived verbatim."""
         ...
 
     async def list_dataset(self, release_id: ReleaseId, dataset: DatasetName) -> DatasetListing:

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
 import aiohttp
 from gcloud.aio.auth import Token
 
 from openknowledge_adapters.batch.config import BatchConfig
+from openknowledge_contracts.sources import SourceName
 from openknowledge_core.ingestion.errors import (
     TRANSIENT_STATUSES,
     BatchRejected,
@@ -27,6 +28,10 @@ ENDED = {
 }
 # No VM yet, so no task of the job has used the S2 key.
 QUEUED = {"QUEUED", "SCHEDULED"}
+CLI_GROUPS: Mapping[SourceName, str] = {"semantic-scholar": "s2", "openalex": "openalex"}
+JOB_PREFIXES: Mapping[SourceName, str] = {"semantic-scholar": "s2", "openalex": "oa"}
+# Jobs submitted before the source label existed are Semantic Scholar jobs.
+LEGACY_SOURCE: SourceName = "semantic-scholar"
 
 
 class _JobExists(Exception):
@@ -81,9 +86,12 @@ class CloudBatchJobs:
                 state = job.get("status", {}).get("state")
                 if "operation-id" in job.get("labels", {}) and state not in ENDED:
                     labels = job["labels"]
+                    if labels.get("source", LEGACY_SOURCE) != family.source:
+                        continue
                     job_family = labels.get("archive-family")
                     if (
                         job_family is None
+                        and family.source == LEGACY_SOURCE
                         and ARCHIVE_DATASETS.get(labels.get("dataset", "")) == ArchiveFamily.CORE
                     ):
                         job_family = ArchiveFamily.CORE.value
@@ -150,12 +158,21 @@ class CloudBatchJobs:
 def job_id(job: ShardJob) -> str:
     """At most 63 lowercase characters, stable for retries of the same operation."""
     part = f"-{job.part}" if job.part else ""
-    name = f"s2-{job.dataset.replace('_', '-')}-{job.release_id}{part}"[:30].rstrip("-")
+    name = f"{JOB_PREFIXES[job.source]}-{job.dataset.replace('_', '-')}-{job.release_id}{part}"[
+        :30
+    ].rstrip("-")
     return f"{name}-{job.operation_id.hex}"
 
 
 def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
-    command = ["s2", "download-shard", "--release", job.release_id, "--dataset", job.dataset]
+    command = [
+        CLI_GROUPS[job.source],
+        "download-shard",
+        "--release",
+        job.release_id,
+        "--dataset",
+        job.dataset,
+    ]
     command += ["--bucket", job.bucket, "--prefix", job.prefix]
     if job.from_release is not None and job.part is not None:
         command += ["--from-release", job.from_release, "--part", job.part]
@@ -195,7 +212,8 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
             },
         },
         "labels": {
-            "archive-family": archive_family(job.dataset).value,
+            "source": job.source,
+            "archive-family": archive_family(job.dataset, job.source).value,
             "dataset": job.dataset.replace("_", "-"),
             "release": job.release_id,
             "part": job.part or "base",

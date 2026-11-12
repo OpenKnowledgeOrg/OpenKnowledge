@@ -38,6 +38,7 @@ from openknowledge_core.ingestion.models import (
     LoadObject,
     LoadRecord,
     Operation,
+    ReleaseDocument,
     ShardJob,
     ShardLink,
     StoredObject,
@@ -116,6 +117,7 @@ class FakeSource:
     def __init__(self) -> None:
         self.releases = [RELEASE]
         self.files: dict[str, dict[str, bytes]] = {}
+        self.documents: tuple[ReleaseDocument, ...] = ()
         self.readme = "Terms of use for the release."
         self.listings = 0
         self.resolved: list[str] = []
@@ -158,6 +160,9 @@ class FakeSource:
                 ],
             }
         )
+
+    async def release_documents(self, release_id: str) -> tuple[ReleaseDocument, ...]:
+        return self.documents
 
     async def list_dataset(self, release_id: str, dataset: str) -> DatasetListing:
         self.listings += 1
@@ -220,10 +225,10 @@ class FakeSource:
         if shard.file_name in self.unavailable:
             self.unavailable.remove(shard.file_name)
             raise SourceUnavailable(f"HTTP 503 from https://files.test{shard.source_path}")
-        dataset = shard.source_path.split("/")[-2]
         data = self.diff_files.get(shard.source_path)
         if data is None:
-            data = self.files[dataset][shard.file_name]
+            dataset, name = shard.source_path.removeprefix(f"/staging/{RELEASE}/").split("/", 1)
+            data = self.files[dataset][name]
         size = self.declared.get(shard.file_name, len(data))
         return ByteStream(expected_size=size, chunks=self._chunks(shard.file_name, data))
 
@@ -237,7 +242,9 @@ class FakeSource:
 
 
 def shard_ref(dataset: str, name: str) -> ShardRef:
-    return ShardRef(source_path=f"/staging/{RELEASE}/{dataset}/{name}", file_name=name)
+    return ShardRef(
+        source_path=f"/staging/{RELEASE}/{dataset}/{name}", file_name=name.rsplit("/", 1)[-1]
+    )
 
 
 def diff_ref(part: str, old: str, new: str, dataset: str, name: str) -> ShardRef:
