@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -13,7 +13,13 @@ from typing import TYPE_CHECKING
 from openknowledge_adapters import batch, clickhouse, gcs, opensearch, semantic_scholar
 from openknowledge_adapters.clickhouse.embedding_index import write_index
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
-from openknowledge_core.embeddings import ConvertJobs, EmbeddingConversion, EmbeddingIndexLoad
+from openknowledge_core.embeddings import (
+    ConvertJobs,
+    EmbeddingConversion,
+    EmbeddingIndexLoad,
+    EmbeddingVectors,
+    lookup_vectors,
+)
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
     LoadDatasetService,
@@ -210,6 +216,19 @@ async def open_index_load(settings: LoadSettings) -> AsyncGenerator[EmbeddingInd
             applied=ch.applied,
             producer=producer(settings),
             clock=lambda: datetime.now(UTC),
+        )
+
+
+@asynccontextmanager
+async def open_vector_lookup(
+    settings: LoadSettings,
+) -> AsyncGenerator[Callable[[Iterable[int], str], Awaitable[EmbeddingVectors]], None]:
+    async with (
+        gcs.connect(_gcs(settings)) as store,
+        clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
+    ):
+        yield lambda corpusids, bucket: lookup_vectors(
+            corpusids, ch.locations.locate, store.read_range, bucket
         )
 
 

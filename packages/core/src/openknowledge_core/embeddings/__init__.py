@@ -9,6 +9,13 @@ from openknowledge_core.embeddings.commands import (
     LoadIndexResult,
 )
 from openknowledge_core.embeddings.convert import convert_shard
+from openknowledge_core.embeddings.errors import NoIndexLoaded, TooManyIds
+from openknowledge_core.embeddings.lookup import (
+    MAX_CONCURRENT_READS,
+    MAX_LOOKUP_IDS,
+    EmbeddingVectors,
+    lookup_vectors,
+)
 from openknowledge_core.embeddings.models import (
     CONVERT_FAMILY,
     ROW_BYTES,
@@ -23,6 +30,8 @@ from openknowledge_core.embeddings.service import EmbeddingConversion, Embedding
 
 __all__ = [
     "CONVERT_FAMILY",
+    "MAX_CONCURRENT_READS",
+    "MAX_LOOKUP_IDS",
     "ROW_BYTES",
     "VECTOR_DIM",
     "ConvertEmbeddingShard",
@@ -34,11 +43,15 @@ __all__ = [
     "EmbeddingConversion",
     "EmbeddingIndexLoad",
     "EmbeddingStore",
+    "EmbeddingVectors",
     "IndexRow",
     "LoadEmbeddingIndex",
     "LoadIndexResult",
     "LocationIndex",
+    "NoIndexLoaded",
     "ShardPart",
+    "TooManyIds",
     "convert_shard",
+    "lookup_vectors",
     "output_names",
 ]

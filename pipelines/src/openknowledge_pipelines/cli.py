@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import Callable, Coroutine, Mapping
 from contextlib import aclosing
@@ -11,8 +12,9 @@ from typing import Any, Literal, TextIO, cast
 from uuid import UUID
 
 import click
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from openknowledge_contracts.manifests import BucketName
 from openknowledge_core.embeddings import (
     ConvertEmbeddings,
     ConvertEmbeddingShard,
@@ -589,6 +591,44 @@ def load_index(**options: str | None) -> None:
             return await service.load(command)
 
     _run_load(run)
+
+
+@embeddings.command(
+    "lookup", help="Print the vector of each paper as a JSON line, and a count of those missing."
+)
+@click.option("--id", "ids", type=click.IntRange(0, 2**64 - 1), multiple=True, help="Corpus ID.")
+@click.option(
+    "--ids-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="A file of corpus IDs, one per line.",
+)
+@click.option("--curated-bucket", required=True, help="Bucket holding the converted files.")
+def lookup(ids: tuple[int, ...], ids_file: Path | None, curated_bucket: str) -> None:
+    if not ids and ids_file is None:
+        raise click.UsageError("give --id or --ids-file")
+    try:
+        TypeAdapter(BucketName).validate_python(curated_bucket)
+    except ValidationError:
+        raise click.UsageError(CONVERT_RULES["curated_bucket"]) from None
+    words = ids_file.read_text().split() if ids_file else []
+    if not all(word.isascii() and word.isdigit() and int(word) < 2**64 for word in words):
+        raise click.UsageError("--ids-file must hold one corpus ID per line")
+    settings = _settings(LoadSettings)
+
+    async def run() -> None:
+        async with bootstrap.open_vector_lookup(settings) as vectors_of:
+            found = await vectors_of([*ids, *map(int, words)], curated_bucket)
+        for corpusid, vector in found.vectors.items():
+            click.echo(json.dumps({"corpusid": corpusid, "vector": vector}))
+        release = found.release or "none"
+        click.echo(
+            f"release={release} found={len(found.vectors)} missing={len(found.missing)}", err=True
+        )
+
+    try:
+        asyncio.run(run())
+    except IngestionError as exc:
+        raise click.ClickException(str(exc)) from None
 
 
 @main.group("admission")

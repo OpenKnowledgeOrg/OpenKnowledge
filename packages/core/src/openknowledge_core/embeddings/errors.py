@@ -17,3 +17,7 @@ class IndexIncomplete(IngestionError):
 
 class NoIndexLoaded(IngestionError):
     """The location table holds no loaded release, so nothing can be located."""
+
+
+class TooManyIds(IngestionError):
+    """A lookup asked for more papers than one call reads."""

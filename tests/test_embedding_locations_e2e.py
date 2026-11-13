@@ -15,6 +15,7 @@ from pydantic import HttpUrl, SecretStr
 from openknowledge_adapters import clickhouse, gcs
 from openknowledge_adapters.clickhouse.embedding_index import write_index
 from openknowledge_core.embeddings import (
+    ROW_BYTES,
     ConvertEmbeddingShard,
     EmbeddingConversion,
     ShardPart,
@@ -108,13 +109,16 @@ def convert(
     on_gcs(ports, work)
 
 
-def load_index(ports: dict[str, str], *args: str) -> tuple[int, str]:
-    env = {
+def env(ports: dict[str, str]) -> dict[str, str]:
+    return {
         "OKP_CLICKHOUSE_URL": f"http://127.0.0.1:{ports['CLICKHOUSE_PORT']}",
         "CLICKHOUSE_PASSWORD": "openknowledge",
         "OKP_CLICKHOUSE_RAW_BUCKET": BUCKET,
         "OKP_GCS_API_ROOT": f"http://127.0.0.1:{ports['GCS_PORT']}",
     }
+
+
+def load_index(ports: dict[str, str], *args: str) -> tuple[int, str]:
     command = [
         "embeddings",
         "load-index",
@@ -124,8 +128,17 @@ def load_index(ports: dict[str, str], *args: str) -> tuple[int, str]:
         "--curated-bucket",
         CURATED,
     ]
-    result = CliRunner().invoke(cli.main, command, env=env)
+    result = CliRunner().invoke(cli.main, command, env=env(ports))
     return result.exit_code, result.output
+
+
+def lookup(ports: dict[str, str], *ids: int) -> tuple[list[dict[str, object]], str]:
+    command = ["embeddings", "lookup", "--curated-bucket", CURATED]
+    for corpusid in ids:
+        command += ["--id", str(corpusid)]
+    result = CliRunner().invoke(cli.main, command, env=env(ports))
+    assert result.exit_code == 0, result.output
+    return [json.loads(line) for line in result.stdout.splitlines()], result.stderr.strip()
 
 
 def loaded(ports: dict[str, str], *args: str) -> dict[str, object]:
@@ -157,6 +170,11 @@ def blob(release: str, part: ShardPart, shard: int) -> str:
 def test_locate_before_load_is_refused(ports: dict[str, str]) -> None:
     with pytest.raises(NoIndexLoaded, match="no embedding index loaded"):
         locate(ports, [1])
+    result = CliRunner().invoke(
+        cli.main, ["embeddings", "lookup", "--id", "1", "--curated-bucket", CURATED], env=env(ports)
+    )
+    assert result.exit_code == 1
+    assert "no embedding index loaded" in result.output
 
 
 def test_base_then_diff_locates_latest_and_hides_deleted(ports: dict[str, str]) -> None:
@@ -185,6 +203,17 @@ def test_base_then_diff_locates_latest_and_hides_deleted(ports: dict[str, str]) 
             3: (blob(BASE, "base", 2), 0),
         },
     )
+    assert lookup(ports, 3, 2, 3) == (
+        [{"corpusid": 3, "vector": [2.5] * 768}, {"corpusid": 2, "vector": [1.5] * 768}],
+        f"release={BASE} found=2 missing=0",
+    )
+
+    async def ranges(store: gcs.GcsArtifactStore) -> None:
+        name = blob(BASE, "base", 0)
+        assert len(await store.read_range(CURATED, name, 3000, ROW_BYTES)) == ROW_BYTES - 3000
+        assert await store.read_range(CURATED, name, ROW_BYTES, ROW_BYTES) == b""
+
+    on_gcs(ports, ranges)
 
     diff = FakeSource()
     diff.releases = [NEXT]
@@ -203,5 +232,9 @@ def test_base_then_diff_locates_latest_and_hides_deleted(ports: dict[str, str]) 
     # A rerun converges on the same rows.
     assert loaded(ports, "--release", NEXT, "--from-release", BASE) == expected
     assert locate(ports, [1, 2, 3]) == (date.fromisoformat(NEXT), {1: (blob(BASE, "base", 0), 0)})
+    assert lookup(ports, 2, 1, 404) == (
+        [{"corpusid": 1, "vector": [0.5] * 768}],
+        f"release={NEXT} found=1 missing=2",
+    )
     # The most one lookup asks for, with ids as long as any.
     assert locate(ports, [10**12 + i for i in range(20_000)]) == (date.fromisoformat(NEXT), {})

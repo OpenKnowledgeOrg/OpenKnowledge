@@ -179,6 +179,22 @@ class GcsArtifactStore:
             return _stored(path, metadata)
         raise error
 
+    async def read_range(self, bucket: str, name: str, start: int, length: int) -> bytes:
+        """At most ``length`` bytes from ``start``, fewer where the object ends first."""
+        path = ObjectPath(bucket=bucket, name=name)
+        headers = {**IDENTITY, "range": f"bytes={start}-{start + length - 1}"}
+        try:
+            return await self._storage.download(
+                bucket, name, headers=headers, timeout=self._timeout(length)
+            )
+        except aiohttp.ClientResponseError as exc:
+            if exc.status == 416 and _from_storage(exc):  # the object ends before ``start``
+                return b""
+            error = _failure("read", path, exc)
+        except Exception as exc:
+            error = _unreachable("read", path, exc)
+        raise error
+
     async def open_read(self, ref: ObjectRef) -> ByteStream:
         before = await self.stat(ref.path)
         if before is None or before.ref.generation != ref.generation:
