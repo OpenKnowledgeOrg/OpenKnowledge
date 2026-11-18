@@ -5,10 +5,11 @@ import json
 
 import pytest
 
-from openknowledge_contracts.manifests import DatasetManifest
+from openknowledge_contracts.manifests import DatasetManifest, ObjectPath
 from openknowledge_contracts.sources import SOURCES, ArchivedDataset, Source
 from openknowledge_core.ingestion import DownloadDataset, DownloadDatasetService, PinRelease
 from openknowledge_core.ingestion import service as service_module
+from openknowledge_core.ingestion.archive_progress import ArchiveProgress, completion_path
 from openknowledge_core.ingestion.errors import (
     ArchiveConflict,
     ReceiptInvalid,
@@ -16,7 +17,7 @@ from openknowledge_core.ingestion.errors import (
     SourceRejected,
     StoredCopyMismatch,
 )
-from openknowledge_core.ingestion.models import PinnedDataset, release_record_path
+from openknowledge_core.ingestion.models import PinnedDataset, ReleaseDocument, release_record_path
 from openknowledge_core.ingestion.service import SERVED_NOW
 from tests.fakes.ports import (
     COMMAND,
@@ -274,6 +275,62 @@ async def test_a_stored_parquet_copy_unlike_the_listed_size_is_not_receipted(
     assert str(pinned.receipt_path(shard)) not in store.objects
 
 
+async def test_partition_folders_keep_same_named_files_apart(
+    source: FakeSource, store: FakeStore
+) -> None:
+    openalex = Source(
+        name="openalex",
+        prefix="openalex",
+        datasets={"works": ArchivedDataset("parquet", folders=1)},
+        contracts={},
+    )
+    service = DownloadDatasetService(
+        catalog=source,
+        downloads=source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+        source=openalex,
+    )
+    for day in ("2026-10-14", "2026-10-13"):
+        source.add("works", f"updated_date={day}/part_0000.parquet", parquet(10))
+    pinned = await service.pin_dataset(
+        DownloadDataset(release=RELEASE, dataset="works", bucket="raw", prefix="openalex")
+    )
+    assert [str(pinned.object_path(shard)) for shard in pinned.shards] == [
+        f"gs://raw/openalex/{RELEASE}/works/updated_date=2026-10-14/part_0000.parquet",
+        f"gs://raw/openalex/{RELEASE}/works/updated_date=2026-10-13/part_0000.parquet",
+    ]
+
+
+async def test_partitioned_archives_complete(source: FakeSource, store: FakeStore) -> None:
+    service = DownloadDatasetService(
+        catalog=source,
+        downloads=source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+        source=SOURCES["openalex"],
+    )
+    for day in ("2026-10-14", "2026-10-13"):
+        source.add("authors", f"updated_date={day}/part_0000.parquet", parquet(10))
+    command = DownloadDataset(release=RELEASE, dataset="authors", bucket="raw", prefix="openalex")
+    pinned = await service.pin_dataset(command)
+    for shard in pinned.shards:
+        await service.archive_shard(pinned, shard)
+    await ArchiveProgress(store, service, PRODUCER, clock, SOURCES["openalex"]).finalize(command)
+    assert str(completion_path(command)) in store.objects
+
+
+async def test_flat_shards_with_one_file_name_are_still_refused(
+    service: DownloadDatasetService, source: FakeSource
+) -> None:
+    source.add("papers", "a/part-0.gz", gz(b"{}\n"))
+    source.add("papers", "b/part-0.gz", gz(b"{}\n"))
+    with pytest.raises(SourceRejected, match="same path or file name"):
+        await service.pin_dataset(COMMAND)
+
+
 async def pin_works(
     source: FakeSource, store: FakeStore, size: int | None = None
 ) -> tuple[DownloadDatasetService, PinnedDataset]:
@@ -299,3 +356,20 @@ async def pin_works(
         DownloadDataset(release=RELEASE, dataset="works", bucket="raw", prefix="openalex")
     )
     return service, pinned
+
+
+async def test_release_documents_land_verbatim_and_a_changed_copy_conflicts(
+    service: DownloadDatasetService, source: FakeSource, store: FakeStore
+) -> None:
+    add_papers(source)
+    command = PinRelease(release="latest", bucket="raw", prefix="s2")
+    first = b'{"date": "2026-10-06"}\n'
+    source.documents = (ReleaseDocument(name="manifest.json", data=first),)
+    await service.pin_release(command)
+    path = ObjectPath.under("raw", "s2", RELEASE, "manifest.json")
+    assert store.data(path) == first
+    await service.pin_release(command)
+    changed = b'{"date": "2026-10-06" }\n'
+    source.documents = (ReleaseDocument(name="manifest.json", data=changed),)
+    with pytest.raises(ArchiveConflict, match="manifest.json"):
+        await service.pin_release(command)

@@ -1,13 +1,21 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
-from openknowledge_adapters import gcs, semantic_scholar
-from openknowledge_core.ingestion import DownloadDatasetService
+from openknowledge_adapters import batch, gcs, semantic_scholar
+from openknowledge_adapters.openalex import OpenAlexCatalog
+from openknowledge_core.ingestion import DownloadDatasetService, ShardJobs
 from openknowledge_pipelines import bootstrap
-from openknowledge_pipelines.settings import PipelineSettings
+from openknowledge_pipelines.settings import (
+    BatchJobSettings,
+    BatchSettings,
+    OpenAlexBatchSettings,
+    PipelineSettings,
+    SyncSettings,
+)
 from tests.fakes.ports import FakeStore
 
 DIGEST = "sha256:" + "a" * 64
@@ -88,3 +96,74 @@ def test_the_producer_names_the_package_and_the_image(monkeypatch: pytest.Monkey
         "0.1.0",
         DIGEST,
     )
+
+
+BATCH_JOB_ENV = {
+    "OKP_IMAGE_DIGEST": DIGEST,
+    "OKP_BATCH_PROJECT": "p",
+    "OKP_BATCH_REGION": "europe-west4",
+    "OKP_BATCH_SERVICE_ACCOUNT": "download@p.iam.gserviceaccount.com",
+    "OKP_BATCH_NETWORK": "n",
+    "OKP_BATCH_SUBNETWORK": "s",
+    "OKP_BATCH_IMAGE_REPOSITORY": "repo/pipelines",
+}
+
+
+def test_openalex_batch_settings_need_no_s2_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    monkeypatch.delenv("OKP_BATCH_S2_KEY_SECRET", raising=False)
+    for name, value in BATCH_JOB_ENV.items():
+        monkeypatch.setenv(name, value)
+    settings = OpenAlexBatchSettings()  # pyright: ignore[reportCallIssue]
+    assert settings.batch_openalex_parallelism == 8
+    with pytest.raises(ValidationError):
+        BatchSettings()  # pyright: ignore[reportCallIssue]
+
+
+async def test_the_openalex_download_is_wired_for_openalex_without_the_s2_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    for name, value in BATCH_JOB_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("OKP_BATCH_OPENALEX_PARALLELISM", "3")
+    seen: list[batch.BatchConfig] = []
+
+    @asynccontextmanager
+    async def spy_batch(config: batch.BatchConfig) -> AsyncGenerator[ShardJobs]:
+        seen.append(config)
+        yield cast(ShardJobs, object())  # the real client would fetch Google credentials here
+
+    @asynccontextmanager
+    async def fake_gcs(config: gcs.GcsConfig) -> AsyncGenerator[FakeStore]:
+        yield FakeStore()
+
+    monkeypatch.setattr(batch, "connect", spy_batch)
+    monkeypatch.setattr(gcs, "connect", fake_gcs)
+    async with bootstrap.open_openalex_download(
+        OpenAlexBatchSettings()  # pyright: ignore[reportCallIssue]
+    ) as (service, _):
+        assert isinstance(service.catalog, OpenAlexCatalog)
+    [config] = seen
+    assert (config.parallelism, config.secrets) == (3, {})
+    assert config.environment == {"OKP_IMAGE_DIGEST": DIGEST}
+
+
+S2_AND_LOAD_ENV = {
+    "S2_API_KEY": "k",
+    "OKP_BATCH_S2_KEY_SECRET": "projects/p/secrets/s2-api-key/versions/latest",
+    "OKP_CLICKHOUSE_URL": "http://clickhouse:8123",
+    "CLICKHOUSE_PASSWORD": "dev",
+    "OKP_CLICKHOUSE_RAW_BUCKET": "raw",
+}
+
+
+@pytest.mark.parametrize("settings_class", [BatchSettings, SyncSettings, OpenAlexBatchSettings])
+def test_every_batch_settings_class_requires_the_image_digest(
+    monkeypatch: pytest.MonkeyPatch, settings_class: type[BatchJobSettings]
+) -> None:
+    for name, value in {**BATCH_JOB_ENV, **S2_AND_LOAD_ENV}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("OKP_IMAGE_DIGEST")
+    with pytest.raises(ValidationError, match="image_digest"):
+        settings_class()  # pyright: ignore[reportCallIssue]

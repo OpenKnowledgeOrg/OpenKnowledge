@@ -36,6 +36,10 @@ class SourceRejected(IngestionError):
     """Semantic Scholar refused a request, or sent data this code cannot use."""
 
 
+class DatasetNotInRelease(SourceRejected):
+    """The release does not list a dataset the source registry archives."""
+
+
 class LinkExpired(IngestionError):
     """A signed link no longer works and needs a fresh listing."""
 

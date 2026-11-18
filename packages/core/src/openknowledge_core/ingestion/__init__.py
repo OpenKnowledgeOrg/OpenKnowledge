@@ -1,6 +1,8 @@
 """Archiving Semantic Scholar datasets into the raw bucket."""
 
 from openknowledge_core.ingestion.commands import (
+    ArchiveRelease,
+    ArchiveReleaseResult,
     BatchDiffDownloadResult,
     BatchDownloadResult,
     DownloadDataset,
@@ -40,6 +42,8 @@ from openknowledge_core.ingestion.service import DownloadDatasetService
 from openknowledge_core.ingestion.watchdog import WatchdogService
 
 __all__ = [
+    "ArchiveRelease",
+    "ArchiveReleaseResult",
     "AppliedReleases",
     "ArtifactStore",
     "BatchDiffDownloadResult",

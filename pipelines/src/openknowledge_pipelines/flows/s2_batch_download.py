@@ -39,6 +39,8 @@ class S2BatchDownloadFlows:
 
 
 def _flow_name(family: ArchiveFamily, *, diff: bool = False) -> str:
+    if family == ArchiveFamily.OPENALEX:
+        return "openalex-batch-download"
     suffix = "" if family == ArchiveFamily.CORE else f"-{family}"
     return f"s2-batch-download{suffix}{'-diff' if diff else ''}"
 
@@ -153,6 +155,7 @@ def s2_batch_download_flows(
             if not shards:
                 break
             job = ShardJob(
+                source=family.source,
                 release_id=pinned.release_id,
                 dataset=pinned.dataset,
                 bucket=pinned.bucket,

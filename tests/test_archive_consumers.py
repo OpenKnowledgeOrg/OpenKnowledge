@@ -48,7 +48,9 @@ async def test_completed_base_through_streaming_storage_adapter(replace_before_m
             )
             pinned = await service.pin_dataset(command)
             await service.archive_shard(pinned, pinned.shards[0])
-            await ArchiveProgress(store, service, PRODUCER, clock).finalize(command)
+            await ArchiveProgress(
+                store, service, PRODUCER, clock, SOURCES["semantic-scholar"]
+            ).finalize(command)
         if replace_before_media:
             path = pinned.object_path(pinned.shards[0])
             original_generation = server.objects[(path.bucket, path.name)].generation

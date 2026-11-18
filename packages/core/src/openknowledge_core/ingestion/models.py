@@ -30,6 +30,7 @@ from openknowledge_contracts.datasets import (
     DatasetName,
     DatasetSummary,
     DiffPart,
+    FileName,
     ReleaseId,
     ShardRef,
 )
@@ -44,6 +45,7 @@ from openknowledge_contracts.manifests import (
     ObjectRef,
     Sha256Hex,
 )
+from openknowledge_contracts.sources import SourceName
 from openknowledge_contracts.tables.contract import UpdateMode
 
 type Operation = Literal["upsert", "delete"]
@@ -68,6 +70,15 @@ class ShardLink(BaseModel):
     url: SecretStr
     size: NonNegativeInt | None = None
     records: NonNegativeInt | None = None
+
+
+class ReleaseDocument(BaseModel):
+    """A file the source publishes about a release, archived byte for byte."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: FileName
+    data: bytes
 
 
 class DatasetListing(BaseModel):
@@ -141,6 +152,7 @@ class PinnedDataset(BaseModel):
     shards: tuple[ShardRef, ...]
     from_release: ReleaseId | None = None
     part: DiffPart | None = None
+    folders: NonNegativeInt = 0
 
     @model_validator(mode="after")
     def _diff(self) -> Self:
@@ -163,10 +175,10 @@ class PinnedDataset(BaseModel):
         )
 
     def object_path(self, shard: ShardRef) -> ObjectPath:
-        return self.path(shard.file_name)
+        return self.path(archive_name(shard, self.folders))
 
     def receipt_path(self, shard: ShardRef) -> ObjectPath:
-        return self.path(shard.file_name + RECEIPT_SUFFIX)
+        return self.path(archive_name(shard, self.folders) + RECEIPT_SUFFIX)
 
     @property
     def inventory_path(self) -> ObjectPath:
@@ -184,6 +196,11 @@ class PinnedDataset(BaseModel):
     @property
     def manifest_path(self) -> ObjectPath:
         return self.path(MANIFEST_NAME)
+
+
+def archive_name(shard: ShardRef, folders: int) -> str:
+    """The last folders + 1 segments of the source path, so partition folders stay in names."""
+    return "/".join(shard.source_path.split("/")[-(folders + 1) :])
 
 
 def release_record_path(bucket: str, prefix: str, release_id: str) -> ObjectPath:
@@ -356,6 +373,7 @@ class ShardJob(BaseModel):
 
     operation_id: UUID = Field(default_factory=uuid4)
     """One logical submission, retained across retries and renewed for the next round."""
+    source: SourceName
     release_id: ReleaseId
     dataset: DatasetName
     bucket: BucketName

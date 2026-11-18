@@ -69,6 +69,10 @@ jobs:
             module: openknowledge_adapters.semantic_scholar
             tests: packages/adapters/tests/semantic_scholar
           - package: openknowledge-adapters
+            extra: openalex
+            module: openknowledge_adapters.openalex
+            tests: packages/adapters/tests/openalex
+          - package: openknowledge-adapters
             extra: gcs
             module: openknowledge_adapters.gcs
             tests: packages/adapters/tests/gcs

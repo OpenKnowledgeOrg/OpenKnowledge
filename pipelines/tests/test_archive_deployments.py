@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Literal
 
 import httpx
@@ -11,10 +12,23 @@ from prefect.client.orchestration import PrefectClient
 from prefect.client.schemas.objects import ConcurrencyLeaseHolder
 from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
 
-from openknowledge_core.ingestion import DownloadDatasetService, ShardJobs
+from openknowledge_contracts.sources import SOURCES
+from openknowledge_core.ingestion import (
+    ArchiveRelease,
+    BatchDownloadResult,
+    DownloadDataset,
+    DownloadDatasetService,
+    ShardJob,
+    ShardJobs,
+)
+from openknowledge_core.ingestion.errors import (
+    DatasetNotInRelease,
+    IngestionError,
+    RowCountMismatch,
+)
 from openknowledge_pipelines import admission, bootstrap, deployments
-from openknowledge_pipelines.settings import BatchSettings, LoadSettings
-from tests.fakes.ports import COMMAND, DIFF, FakeSource, FakeStore
+from openknowledge_pipelines.settings import BatchSettings, LoadSettings, OpenAlexBatchSettings
+from tests.fakes.ports import COMMAND, DIFF, FakeJobs, FakeSource, FakeStore
 
 
 @pytest.mark.parametrize("dataset", ["s2orc_v2", "embeddings-specter_v2", "s2orc", "unknown"])
@@ -150,6 +164,7 @@ async def test_managed_manual_diff_retries_only_anchored_completions(
     source: FakeSource,
     store: FakeStore,
 ) -> None:
+    from openknowledge_contracts.sources import SOURCES
     from openknowledge_core.ingestion.archive_progress import (
         ArchiveCompletion,
         ArchiveProgress,
@@ -159,7 +174,7 @@ async def test_managed_manual_diff_retries_only_anchored_completions(
     from openknowledge_core.ingestion.errors import IngestionError
     from tests.fakes.ports import NEXT, PAPERS, PRODUCER, clock
 
-    progress = ArchiveProgress(store, service, PRODUCER, clock)
+    progress = ArchiveProgress(store, service, PRODUCER, clock, SOURCES["semantic-scholar"])
     base = COMMAND.model_copy(update={"dataset": "s2orc_v2"})
     diff = DIFF.model_copy(update={"dataset": base.dataset})
     source.add(base.dataset, "part.gz", PAPERS["part-0.gz"])
@@ -270,3 +285,79 @@ async def test_closed_admission_refuses_edge_build_before_clickhouse(
     with pytest.raises(admission.AdmissionError, match="closed"):
         await deployments.s2_build_read_tables.fn()
     assert events == ["capacity", "released"]
+
+
+@pytest.mark.usefixtures("prefect_server")
+async def test_a_second_openalex_archive_is_refused_while_one_runs(
+    monkeypatch: pytest.MonkeyPatch, oa_wired: DownloadDatasetService
+) -> None:
+    started, gate = asyncio.Event(), asyncio.Event()
+
+    class BlockedJobs(FakeJobs):
+        async def submit(self, job: ShardJob) -> str:
+            started.set()
+            await gate.wait()
+            return await super().submit(job)
+
+    jobs = BlockedJobs(oa_wired, failing=set())
+
+    @asynccontextmanager
+    async def open_openalex_download(
+        settings: OpenAlexBatchSettings,
+    ) -> AsyncGenerator[tuple[DownloadDatasetService, ShardJobs]]:
+        yield oa_wired, jobs
+
+    monkeypatch.setattr(deployments, "OpenAlexBatchSettings", OpenAlexBatchSettings.model_construct)
+    monkeypatch.setattr(bootstrap, "open_openalex_download", open_openalex_download)
+    deployments.ensure_limits()
+    first = asyncio.create_task(
+        deployments.openalex_batch_download.fn(
+            ArchiveRelease(release="2026-10-06", bucket="raw", dataset="works")
+        )
+    )
+    try:
+        async with asyncio.timeout(60):
+            await started.wait()
+            with pytest.raises(ConcurrencySlotAcquisitionError):
+                await deployments.openalex_batch_download.fn(
+                    ArchiveRelease(release="2026-10-06", bucket="raw", dataset="works-deleted")
+                )
+    finally:
+        gate.set()
+    assert (await first).datasets[0].dataset == "works"
+    assert jobs.deleted == []
+
+
+@pytest.mark.usefixtures("prefect_server")
+async def test_an_openalex_archive_goes_on_past_a_failed_or_unlisted_dataset(
+    monkeypatch: pytest.MonkeyPatch, oa_wired: DownloadDatasetService
+) -> None:
+    tried: list[str] = []
+
+    async def dataset(command: DownloadDataset) -> BatchDownloadResult:
+        tried.append(command.dataset)
+        if command.dataset == "concepts":
+            raise DatasetNotInRelease("release 2026-10-06 of OpenAlex has no dataset 'concepts'")
+        if command.dataset == "authors":
+            raise RowCountMismatch("part_0001.parquet holds 3 rows, the manifest 4")
+        return BatchDownloadResult.model_construct(dataset=command.dataset)
+
+    @asynccontextmanager
+    async def open_openalex_download(
+        settings: OpenAlexBatchSettings,
+    ) -> AsyncGenerator[tuple[DownloadDatasetService, ShardJobs]]:
+        yield oa_wired, FakeJobs(oa_wired, failing=set())
+
+    def flows(*args: object) -> SimpleNamespace:
+        return SimpleNamespace(dataset=SimpleNamespace(fn=dataset))
+
+    monkeypatch.setattr(deployments, "OpenAlexBatchSettings", OpenAlexBatchSettings.model_construct)
+    monkeypatch.setattr(bootstrap, "open_openalex_download", open_openalex_download)
+    monkeypatch.setattr(bootstrap, "batch_download_flows", flows)
+    deployments.ensure_limits()
+    with pytest.raises(IngestionError, match=r"1 datasets failed.*authors \(RowCountMismatch"):
+        await deployments.openalex_batch_download(
+            ArchiveRelease(release="2026-10-06", bucket="raw")
+        )
+    assert tried[:4] == ["works", "sources", "works-deleted", "authors"]
+    assert sorted(tried) == sorted(SOURCES["openalex"].datasets)

@@ -144,7 +144,7 @@ async def _run_sync(
                     baseline.base, baseline.completion
                 )
                 item.final = item.start
-                async with _source_operation(services, archive_family(dataset)):
+                async with _source_operation(services, archive_family(dataset, "semantic-scholar")):
                     item.target = await discovery.target(dataset, item.start)
                 if item.target == item.start:
                     item.outcome = "current"
@@ -157,7 +157,9 @@ async def _run_sync(
                         from_release=old,
                         release=new,
                     )
-                    async with _source_operation(services, archive_family(dataset)):
+                    async with _source_operation(
+                        services, archive_family(dataset, "semantic-scholar")
+                    ):
                         await services.downloads[dataset].diff.fn(download)
                         predecessor = await services.progress.finalize(download, predecessor)
                     item.archived.append(
@@ -181,7 +183,7 @@ async def _transitions(
 ) -> tuple[tuple[str, str], ...]:
     if target is None:
         raise IngestionError("no advertised dataset target")
-    async with _source_operation(services, archive_family(dataset)):
+    async with _source_operation(services, archive_family(dataset, "semantic-scholar")):
         chain = await services.catalog.list_diffs(start, target, dataset)
     return contiguous(chain, dataset, start, target)
 

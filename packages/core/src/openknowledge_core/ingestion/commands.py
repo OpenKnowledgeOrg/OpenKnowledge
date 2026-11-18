@@ -175,6 +175,24 @@ class BatchDownloadResult(BaseModel):
     manifest: ObjectPath
 
 
+class ArchiveRelease(BaseModel):
+    """One OpenAlex release: every registered dataset, or only ``dataset``."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    release: ReleaseId
+    bucket: BucketName
+    prefix: ObjectPrefix = "openalex"
+    dataset: DatasetName | None = None
+
+
+class ArchiveReleaseResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    release_id: ReleaseId
+    datasets: tuple[BatchDownloadResult, ...]
+
+
 class BatchDiffDownloadResult(BaseModel):
     """``manifests`` has one per part with files; a part without files has none."""
 

@@ -3,6 +3,7 @@ from datetime import timedelta
 import pytest
 
 from openknowledge_contracts.manifests import ObjectPath
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import DownloadDatasetService
 from openknowledge_core.ingestion.archive_progress import (
     ArchiveCompletion,
@@ -19,7 +20,7 @@ async def test_adoption_interruption_and_empty_diff(
     source: FakeSource,
     store: FakeStore,
 ) -> None:
-    progress = ArchiveProgress(store, service, PRODUCER, clock)
+    progress = ArchiveProgress(store, service, PRODUCER, clock, SOURCES["semantic-scholar"])
     for name, data in PAPERS.items():
         source.add("papers", name, data)
     pinned = await service.pin_dataset(COMMAND)
@@ -31,7 +32,9 @@ async def test_adoption_interruption_and_empty_diff(
     await service.write_manifest(pinned)  # completed base from an earlier manual operation
     opened = list(source.opened)
     anchor = await progress.finalize(COMMAND)
-    retry = ArchiveProgress(store, service, PRODUCER, lambda: clock() + timedelta(days=1))
+    retry = ArchiveProgress(
+        store, service, PRODUCER, lambda: clock() + timedelta(days=1), SOURCES["semantic-scholar"]
+    )
     assert await retry.finalize(COMMAND) == anchor
     assert source.opened == opened
     source.add_diff("papers", COMMAND.release, NEXT, {}, {})
@@ -63,7 +66,7 @@ async def test_invalid_progress_is_refused(
     store: FakeStore,
     invalid: str,
 ) -> None:
-    progress = ArchiveProgress(store, service, PRODUCER, clock)
+    progress = ArchiveProgress(store, service, PRODUCER, clock, SOURCES["semantic-scholar"])
     source.add("papers", "part.gz", PAPERS["part-0.gz"])
     pinned = await service.pin_dataset(COMMAND)
     await service.archive_shard(pinned, pinned.shards[0])
@@ -110,7 +113,7 @@ async def test_guard_boundary_uses_verified_base_bytes(
     from openknowledge_core.ingestion.coordinator import guard_diff
     from openknowledge_core.ingestion.errors import IngestionError
 
-    progress = ArchiveProgress(store, service, PRODUCER, clock)
+    progress = ArchiveProgress(store, service, PRODUCER, clock, SOURCES["semantic-scholar"])
     source.add("papers", "part.gz", PAPERS["part-0.gz"])
     pinned = await service.pin_dataset(COMMAND)
     await service.archive_shard(pinned, pinned.shards[0])
@@ -131,7 +134,7 @@ async def test_replacement_base_supersedes_old_chain_without_shard_scans(
     store: FakeStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    progress = ArchiveProgress(store, service, PRODUCER, clock)
+    progress = ArchiveProgress(store, service, PRODUCER, clock, SOURCES["semantic-scholar"])
     source.add("papers", "part.gz", PAPERS["part-0.gz"])
     pinned = await service.pin_dataset(COMMAND)
     await service.archive_shard(pinned, pinned.shards[0])
