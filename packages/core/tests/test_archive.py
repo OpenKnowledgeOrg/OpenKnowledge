@@ -6,12 +6,29 @@ import json
 import pytest
 
 from openknowledge_contracts.manifests import DatasetManifest
-from openknowledge_core.ingestion import DownloadDatasetService, PinRelease
+from openknowledge_contracts.sources import SOURCES, ArchivedDataset, Source
+from openknowledge_core.ingestion import DownloadDataset, DownloadDatasetService, PinRelease
 from openknowledge_core.ingestion import service as service_module
-from openknowledge_core.ingestion.errors import ArchiveConflict, ReceiptInvalid, SourceRejected
-from openknowledge_core.ingestion.models import release_record_path
+from openknowledge_core.ingestion.errors import (
+    ArchiveConflict,
+    ReceiptInvalid,
+    RowCountMismatch,
+    SourceRejected,
+    StoredCopyMismatch,
+)
+from openknowledge_core.ingestion.models import PinnedDataset, release_record_path
 from openknowledge_core.ingestion.service import SERVED_NOW
-from tests.fakes.ports import COMMAND, PAPERS, PRODUCER, RELEASE, FakeSource, FakeStore, clock, gz
+from tests.fakes.ports import (
+    COMMAND,
+    PAPERS,
+    PRODUCER,
+    RELEASE,
+    FakeSource,
+    FakeStore,
+    clock,
+    gz,
+    parquet,
+)
 
 RELEASE_JSON = "gs://raw/s2/2026-10-06/release.json"
 DATASET_JSON = "gs://raw/s2/2026-10-06/papers/dataset.json"
@@ -53,7 +70,12 @@ async def test_a_rerun_reads_the_archive_back_and_keeps_its_order(
     first = await service.pin_dataset(COMMAND)
     source.reorder = True
     rerun = DownloadDatasetService(
-        catalog=source, downloads=source, store=store, producer=PRODUCER, clock=clock
+        catalog=source,
+        downloads=source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+        source=SOURCES["semantic-scholar"],
     )
     assert (await rerun.pin_dataset(COMMAND)).shards == first.shards
 
@@ -228,3 +250,52 @@ async def test_a_document_too_large_to_read_back_is_never_written(
     with pytest.raises(SourceRejected, match="more than a rerun reads back"):
         await service.pin_release(PinRelease(bucket="raw", prefix="s2"))
     assert store.objects == {}
+
+
+async def test_a_parquet_footer_unlike_the_listed_rows_leaves_no_object_or_receipt(
+    source: FakeSource, store: FakeStore
+) -> None:
+    service, pinned = await pin_works(source, store)
+    shard = pinned.shards[0]
+    with pytest.raises(RowCountMismatch):
+        await service.archive_shard(pinned, shard)
+    assert str(pinned.object_path(shard)) not in store.objects
+    assert str(pinned.receipt_path(shard)) not in store.objects
+
+
+async def test_a_stored_parquet_copy_unlike_the_listed_size_is_not_receipted(
+    source: FakeSource, store: FakeStore
+) -> None:
+    service, pinned = await pin_works(source, store, size=999_999)
+    shard = pinned.shards[0]
+    store.put(pinned.object_path(shard), parquet(10))
+    with pytest.raises(StoredCopyMismatch, match="lists 999999"):
+        await service.archive_shard(pinned, shard)
+    assert str(pinned.receipt_path(shard)) not in store.objects
+
+
+async def pin_works(
+    source: FakeSource, store: FakeStore, size: int | None = None
+) -> tuple[DownloadDatasetService, PinnedDataset]:
+    openalex = Source(
+        name="openalex",
+        prefix="openalex",
+        datasets={"works": ArchivedDataset("parquet")},
+        contracts={},
+    )
+    service = DownloadDatasetService(
+        catalog=source,
+        downloads=source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+        source=openalex,
+    )
+    source.add("works", "part-0.parquet", parquet(10))
+    source.records["part-0.parquet"] = 11
+    if size is not None:
+        source.sizes["part-0.parquet"] = size
+    pinned = await service.pin_dataset(
+        DownloadDataset(release=RELEASE, dataset="works", bucket="raw", prefix="openalex")
+    )
+    return service, pinned

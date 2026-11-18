@@ -6,6 +6,7 @@ from contextlib import aclosing
 import pytest
 
 from openknowledge_contracts.manifests import ObjectRef
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion.archive_progress import ArchiveProgress, completion_path
 from openknowledge_core.ingestion.consumers import (
     ArchiveConsumer,
@@ -43,6 +44,7 @@ async def completed(
         store=store,
         producer=PRODUCER,
         clock=clock,
+        source=SOURCES["semantic-scholar"],
     )
     pinned = await service.pin_dataset(command)
     await service.archive_shard(pinned, pinned.shards[0])

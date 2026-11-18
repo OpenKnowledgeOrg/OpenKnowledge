@@ -1,0 +1,32 @@
+{
+ "schema_version": 1,
+ "source": "semantic-scholar",
+ "release_id": "2026-10-06",
+ "dataset": "papers",
+ "shard": {
+  "source_path": "/staging/2026-10-06/papers/part-0.gz",
+  "file_name": "part-0.gz"
+ },
+ "object_ref": {
+  "path": {
+   "bucket": "raw",
+   "name": "semantic-scholar/2026-10-06/papers/part-0.gz"
+  },
+  "generation": 7
+ },
+ "size": 10,
+ "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+ "md5": "1B2M2Y8AsgTpgAmY7PhCfg==",
+ "crc32c": "AAAAAA==",
+ "schema_ref": "semantic-scholar/papers@2026-10-06",
+ "gzip_members": 1,
+ "records": 3,
+ "uncompressed_size": 30,
+ "producer": {
+  "transform": "verbatim",
+  "transform_version": 1,
+  "software_version": "0.1.0",
+  "image_digest": null
+ },
+ "completed_at": "2026-10-10T00:00:00Z"
+}

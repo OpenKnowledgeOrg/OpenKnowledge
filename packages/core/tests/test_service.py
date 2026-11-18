@@ -12,6 +12,7 @@ from openknowledge_core.ingestion import (
     ShardOutcome,
 )
 from openknowledge_core.ingestion.errors import (
+    DatasetNotArchived,
     GzipInvalid,
     IncompleteTransfer,
     InventoryChanged,
@@ -249,6 +250,16 @@ async def test_a_shard_outside_the_inventory_is_refused(
     pinned = await service.pin_dataset(COMMAND)
     with pytest.raises(ShardNotListed):
         await service.archive_shard(pinned, shard_ref("papers", "part-9.gz"))
+
+
+async def test_an_unlisted_dataset_is_refused_before_anything_is_stored(
+    service: DownloadDatasetService, source: FakeSource, store: FakeStore
+) -> None:
+    source.add("new-s2-dataset", "part.gz", gz(b"{}\n"))
+    command = COMMAND.model_copy(update={"dataset": "new-s2-dataset"})
+    with pytest.raises(DatasetNotArchived, match="add it to the source registry"):
+        await service.pin_dataset(command)
+    assert not store.objects
 
 
 async def test_an_object_another_writer_finalized_first_is_recovered(

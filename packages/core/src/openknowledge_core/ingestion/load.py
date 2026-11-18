@@ -90,9 +90,9 @@ class LoadDatasetService:
                 "a different base needs an empty or new table"
             )
         path = dataset_file_path(
-            command.bucket, command.prefix, command.release, command.dataset, MANIFEST_NAME
+            command.bucket, command.prefix, command.release, table.archive, MANIFEST_NAME
         )
-        manifest = await self._manifest(path, command.release, command.dataset, BASE_HINT)
+        manifest = await self._manifest(path, command.release, table.archive, BASE_HINT)
         prepared = PreparedLoad(manifest_path=path, manifest=manifest, table=table)
         if self._observer is not None:
             await self._observer.planned(prepared)
@@ -145,7 +145,7 @@ class LoadDatasetService:
     async def load_object(self, prepared: PreparedLoad, entry: ManifestEntry) -> LoadOutcome:
         manifest, table, operation = prepared.manifest, prepared.table, prepared.operation
         path = entry.object_ref.path
-        record = await self._tables.loaded(manifest.dataset, path)
+        record = await self._tables.loaded(table.dataset, path)
         if table.has_rows and record is not None and _current(record, entry, prepared):
             return LoadOutcome.ALREADY_LOADED
         stored = await self._store.stat(path)
@@ -159,7 +159,7 @@ class LoadDatasetService:
             await self._observer.started(entry)
         written = await self._tables.load(
             LoadObject(
-                dataset=manifest.dataset,
+                dataset=table.dataset,
                 release=manifest.release_id,
                 object_ref=entry.object_ref,
                 operation=operation,
@@ -202,7 +202,7 @@ class LoadDatasetService:
         """
         manifest, table = prepared.manifest, prepared.table
         records = _record_count(prepared)
-        live = await self._tables.live_rows(manifest.dataset, manifest.release_id)
+        live = await self._tables.live_rows(table.dataset, manifest.release_id)
         duplicates = (
             Duplicates(identical_rows=0, conflicting_keys=0, examples=())
             if live == records
@@ -210,12 +210,12 @@ class LoadDatasetService:
         )
         removed = 0
         if table.updates == "snapshot":
-            removed = await self._tables.mark_removed(manifest.dataset, manifest.release_id)
+            removed = await self._tables.mark_removed(table.dataset, manifest.release_id)
         await self._record(table, manifest.release_id, None)
         counts = Counter(outcomes)
         return LoadDatasetResult(
             release_id=manifest.release_id,
-            dataset=manifest.dataset,
+            dataset=table.dataset,
             table=table.name,
             objects=len(manifest.entries),
             loaded=counts[LoadOutcome.LOADED],
@@ -315,7 +315,7 @@ class LoadDatasetService:
         """Count compatible repeated keys; incompatible values always fail."""
         manifest, path = prepared.manifest, prepared.manifest_path
         found = await self._tables.duplicates(
-            manifest.dataset, [entry.object_ref.path for entry in manifest.entries]
+            prepared.table.dataset, [entry.object_ref.path for entry in manifest.entries]
         )
         if found.conflicting_keys:
             raise ConflictingKeys(

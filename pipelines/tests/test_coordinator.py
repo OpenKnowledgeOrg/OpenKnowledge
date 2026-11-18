@@ -18,6 +18,7 @@ from prefect.exceptions import TerminationSignal
 
 from openknowledge_contracts.datasets import ReleaseMetadata
 from openknowledge_contracts.manifests import ObjectPath
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion import (
     BatchDiffDownloadResult,
@@ -109,6 +110,7 @@ class Cycle:
             store=self.store,
             producer=PRODUCER,
             clock=clock,
+            source=SOURCES["semantic-scholar"],
         )
         self.jobs = FakeJobs(self.downloads, failing=set())
         self.progress = ArchiveProgress(self.store, self.downloads, PRODUCER, clock)

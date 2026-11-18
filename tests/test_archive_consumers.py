@@ -6,6 +6,7 @@ from contextlib import aclosing
 import pytest
 
 from openknowledge_adapters import gcs
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion.archive_progress import ArchiveProgress
 from openknowledge_core.ingestion.consumers import ConsumeBase
 from openknowledge_core.ingestion.errors import ObjectChanged
@@ -43,6 +44,7 @@ async def test_completed_base_through_streaming_storage_adapter(replace_before_m
                 store=store,
                 producer=PRODUCER,
                 clock=clock,
+                source=SOURCES["semantic-scholar"],
             )
             pinned = await service.pin_dataset(command)
             await service.archive_shard(pinned, pinned.shards[0])

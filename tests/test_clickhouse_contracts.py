@@ -12,9 +12,9 @@ from typing import Any
 
 import pytest
 
+from openknowledge_contracts.sources import all_contracts
 from openknowledge_contracts.tables import DatasetContract
 from openknowledge_contracts.tables.clickhouse import Column, table_columns
-from openknowledge_contracts.tables.s2 import CONTRACTS
 from tests.clickhouse_local import (
     MIGRATIONS,
     clickhouse_local,
@@ -66,7 +66,7 @@ def test_the_migrations_create_the_dataset_bookkeeping_and_derived_tables(
 ) -> None:
     created = sorted(table["table"] for table in catalog["tables"])
     assert created == sorted(
-        {contract.table for contract in CONTRACTS.values()} | BOOKKEEPING | DERIVED
+        {contract.table for contract in all_contracts()} | BOOKKEEPING | DERIVED
     )
 
 
@@ -77,7 +77,7 @@ def expression(column: Column) -> tuple[str, str]:
 
 
 @needs_clickhouse
-@pytest.mark.parametrize("contract", CONTRACTS.values(), ids=list(CONTRACTS))
+@pytest.mark.parametrize("contract", all_contracts(), ids=lambda c: c.name)
 def test_columns_match_the_contract(catalog: Catalog, contract: DatasetContract) -> None:
     actual = [
         (c["name"], c["type"], c["default_kind"], c["default_expression"])
@@ -89,7 +89,7 @@ def test_columns_match_the_contract(catalog: Catalog, contract: DatasetContract)
 
 
 @needs_clickhouse
-@pytest.mark.parametrize("contract", CONTRACTS.values(), ids=list(CONTRACTS))
+@pytest.mark.parametrize("contract", all_contracts(), ids=lambda c: c.name)
 def test_tables_keep_the_highest_version_per_key(
     catalog: Catalog, contract: DatasetContract
 ) -> None:

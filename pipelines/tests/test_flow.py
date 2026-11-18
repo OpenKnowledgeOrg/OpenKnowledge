@@ -10,6 +10,7 @@ from prefect.logging.handlers import APILogHandler
 from prefect.settings import PREFECT_RESULTS_LOCAL_STORAGE_PATH, temporary_settings
 
 from openknowledge_contracts.manifests import DatasetManifest
+from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
     JobOutcome,
@@ -60,7 +61,12 @@ async def test_the_flow_archives_the_dataset_then_writes_its_manifest(
     manifest = DatasetManifest.from_json(store.data(result.manifest))
     assert len(manifest.entries) == 2
     rerun = DownloadDatasetService(
-        catalog=source, downloads=source, store=store, producer=PRODUCER, clock=clock
+        catalog=source,
+        downloads=source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+        source=SOURCES["semantic-scholar"],
     )
     again = await build(rerun)(COMMAND)
     assert (again.created, again.verified, again.manifest) == (0, 2, result.manifest)

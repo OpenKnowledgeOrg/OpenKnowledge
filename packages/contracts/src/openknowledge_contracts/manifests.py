@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 from openknowledge_contracts.datasets import ArchiveDocument, DatasetName, ReleaseId, ShardRef
+from openknowledge_contracts.sources import SourceName
 
 
 def _object_name(value: str) -> str:
@@ -41,7 +42,6 @@ Md5Base64 = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9+/]{22}==$")]
 Crc32cBase64 = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9+/]{6}==$")]
 ImageDigest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
 
-SOURCE: Final = "semantic-scholar"
 SCHEMA_VERSION: Final = 1
 TRANSFORM_VERSION: Final = 1
 
@@ -82,7 +82,7 @@ class ShardReceipt(ArchiveDocument):
     """``<file>.receipt.json``: written last, after the object it names passed every check."""
 
     schema_version: Literal[1]
-    source: Literal["semantic-scholar"]
+    source: SourceName
     release_id: ReleaseId
     dataset: DatasetName
     shard: ShardRef
@@ -92,15 +92,22 @@ class ShardReceipt(ArchiveDocument):
     md5: Md5Base64
     crc32c: Crc32cBase64
     schema_ref: Annotated[str, StringConstraints(min_length=1, max_length=256)]
-    """The source's schema for this dataset and release, as semantic-scholar/<dataset>@<release>.
+    """The source's schema for this dataset and release, as <source>/<dataset>@<release>.
 
     A diff's delete files hold only keys, so theirs ends in /deletes.
     """
-    gzip_members: PositiveInt
+    gzip_members: NonNegativeInt
+    """Zero for objects without gzip framing, which only a non-Semantic-Scholar source may have."""
     records: NonNegativeInt
     uncompressed_size: NonNegativeInt
     producer: Producer
     completed_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def _framing(self) -> Self:
+        if self.source == "semantic-scholar" and self.gzip_members == 0:
+            raise ValueError("a Semantic Scholar receipt names at least one gzip member")
+        return self
 
 
 class ManifestEntry(BaseModel):
