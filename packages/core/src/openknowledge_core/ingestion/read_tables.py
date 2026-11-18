@@ -10,12 +10,14 @@ READ_TABLES: tuple[str, ...] = (
     "citation_edges_out",
     "citation_edges_in",
     "paper_xwalk",
+    "paper_abstract_best",
 )
 SOURCE_OF: dict[str, str] = {
     "papers_slim": "papers",
     "citation_edges_out": "citations",
     "citation_edges_in": "citations",
     "paper_xwalk": "papers",
+    "paper_abstract_best": "papers",
 }
 """All read tables must name their source release and live UUID in applied."""
 
@@ -23,12 +25,12 @@ SOURCE_OF: dict[str, str] = {
 GROUPS: dict[str, tuple[str, ...]] = {
     "papers": ("papers_slim",),
     "citations": ("citation_edges_out", "citation_edges_in"),
-    "openalex": ("paper_xwalk",),
+    "openalex": ("paper_xwalk", "paper_abstract_best"),
 }
 GROUP_SOURCES: dict[str, tuple[str, ...]] = {
     "papers": ("papers",),
     "citations": ("citations",),
-    "openalex": ("papers",),
+    "openalex": ("papers", "abstracts"),
 }
 """The tables whose diffs feed a group."""
 QUARTERLY: dict[str, str] = {"openalex": "openalex_works"}

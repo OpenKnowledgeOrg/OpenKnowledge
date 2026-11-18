@@ -102,5 +102,5 @@ def test_plan_group(changes: dict[str, object], full: bool, expected: GroupPlan)
 
 def test_group_release_is_the_earliest_source() -> None:
     assert group_release("openalex", {"papers": "2026-10-13", "abstracts": "2026-10-06"}) == (
-        "2026-10-13"
+        "2026-10-06"
     )

@@ -185,6 +185,10 @@ chosen work comes first. It is its own `openalex` group: it takes the papers dif
 `papers_slim`, and a second applied marker, `paper_xwalk@openalex_works`, names the OpenAlex
 release it was built from. A new OpenAlex release rebuilds only this group at the next sync or
 `okp s2 build-read-tables`; while an OpenAlex load is unfinished the group keeps its last build.
+Migration 00025 adds `paper_abstract_best` to the group: one abstract per live paper, the live S2
+abstract when there is one (even an empty one), otherwise the non-empty abstract of the chosen
+OpenAlex work, with `source` saying which. It takes the papers and abstracts diffs and holds the
+earlier of their two releases; until abstracts holds a release, the group is skipped.
 
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.
