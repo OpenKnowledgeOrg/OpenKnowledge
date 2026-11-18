@@ -179,6 +179,12 @@ insert keeps running in ClickHouse; the next rebuild stops it and removes stale 
 before checking disk capacity. Apply migrations 00017 to 00020 before the first rebuild. After deploying,
 run s2-build-read-tables once, verify all three applied markers at their source releases, and
 delete the old s2-build-citation-edges deployment from Prefect.
+Migration 00024 adds `paper_xwalk`, the OpenAlex works matching each live paper by DOI, arXiv ID,
+PubMed ID, or MAG ID with the same normalised title and a year at most one apart, ranked so the
+chosen work comes first. It is its own `openalex` group: it takes the papers diffs like
+`papers_slim`, and a second applied marker, `paper_xwalk@openalex_works`, names the OpenAlex
+release it was built from. A new OpenAlex release rebuilds only this group at the next sync or
+`okp s2 build-read-tables`; while an OpenAlex load is unfinished the group keeps its last build.
 
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.

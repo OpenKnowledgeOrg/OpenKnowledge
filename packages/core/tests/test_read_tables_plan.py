@@ -4,6 +4,7 @@ from openknowledge_core.ingestion.read_tables import (
     GroupPlan,
     GroupState,
     ReadTablesPath,
+    group_release,
     plan_group,
 )
 
@@ -53,6 +54,11 @@ from openknowledge_core.ingestion.read_tables import (
             GroupPlan(path=ReadTablesPath.FULL, start=None, end="2026-10-13"),
         ),
         (
+            {"quarterly_current": False},
+            False,
+            GroupPlan(path=ReadTablesPath.FULL, start=None, end="2026-10-13"),
+        ),
+        (
             {"marker": "2026-10-13"},
             False,
             GroupPlan(path=ReadTablesPath.CURRENT, start=None, end="2026-10-13"),
@@ -92,3 +98,9 @@ def test_plan_group(changes: dict[str, object], full: bool, expected: GroupPlan)
         }
     )
     assert plan_group(state, full=full) == expected
+
+
+def test_group_release_is_the_earliest_source() -> None:
+    assert group_release("openalex", {"papers": "2026-10-13", "abstracts": "2026-10-06"}) == (
+        "2026-10-13"
+    )

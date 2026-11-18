@@ -1,14 +1,21 @@
+from collections.abc import Mapping
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, NonNegativeFloat, NonNegativeInt
 
 from openknowledge_contracts.datasets import ReleaseId
 
-READ_TABLES: tuple[str, ...] = ("papers_slim", "citation_edges_out", "citation_edges_in")
+READ_TABLES: tuple[str, ...] = (
+    "papers_slim",
+    "citation_edges_out",
+    "citation_edges_in",
+    "paper_xwalk",
+)
 SOURCE_OF: dict[str, str] = {
     "papers_slim": "papers",
     "citation_edges_out": "citations",
     "citation_edges_in": "citations",
+    "paper_xwalk": "papers",
 }
 """All read tables must name their source release and live UUID in applied."""
 
@@ -16,7 +23,26 @@ SOURCE_OF: dict[str, str] = {
 GROUPS: dict[str, tuple[str, ...]] = {
     "papers": ("papers_slim",),
     "citations": ("citation_edges_out", "citation_edges_in"),
+    "openalex": ("paper_xwalk",),
 }
+GROUP_SOURCES: dict[str, tuple[str, ...]] = {
+    "papers": ("papers",),
+    "citations": ("citations",),
+    "openalex": ("papers",),
+}
+"""The tables whose diffs feed a group."""
+QUARTERLY: dict[str, str] = {"openalex": "openalex_works"}
+"""A group's whole-release source: a new release of it rebuilds the group."""
+REBUILT_TOGETHER: tuple[tuple[str, ...], ...] = (("papers", "citations"), ("openalex",))
+
+
+def quarterly_marker(table: str, source: str) -> str:
+    """The ``applied`` target recording which release of ``source`` built ``table``."""
+    return f"{table}@{source}"
+
+
+def group_release(group: str, releases: Mapping[str, ReleaseId]) -> ReleaseId:
+    return min(releases[source] for source in GROUP_SOURCES[group])
 
 
 class ReadTablesPath(StrEnum):
@@ -36,6 +62,7 @@ class GroupState(BaseModel):
     """The source took a base release after the marker, so its diffs do not lead from it."""
     ids_missing_out: bool
     ids_missing_in: bool
+    quarterly_current: bool = True
 
 
 class GroupPlan(BaseModel):
@@ -55,6 +82,7 @@ def plan_group(state: GroupState, *, full: bool) -> GroupPlan:
         or state.source_rebased
         or state.marker > state.source
         or state.ids_missing_out
+        or not state.quarterly_current
     ):
         return GroupPlan(path=ReadTablesPath.FULL, start=None, end=state.source)
     if state.marker == state.source:
