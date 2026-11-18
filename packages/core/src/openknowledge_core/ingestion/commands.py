@@ -111,7 +111,11 @@ class LoadDataset(BaseModel):
 
 
 class LoadDatasetResult(BaseModel):
-    """``removed`` counts the rows that flag keys a snapshot release no longer lists."""
+    """``removed`` counts the rows that flag keys a snapshot release no longer lists.
+
+    ``broken_indexes`` counts the live rows whose abstract index was unreadable, which loaded
+    with an empty abstract.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -125,6 +129,7 @@ class LoadDatasetResult(BaseModel):
     identical_duplicates: NonNegativeInt
     enriched_duplicates: NonNegativeInt = 0
     removed: NonNegativeInt
+    broken_indexes: NonNegativeInt = 0
     manifest: ObjectPath
 
 
@@ -191,6 +196,24 @@ class ArchiveReleaseResult(BaseModel):
 
     release_id: ReleaseId
     datasets: tuple[BatchDownloadResult, ...]
+
+
+class OpenAlexLoad(BaseModel):
+    """Load one archived OpenAlex release into every OpenAlex table."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    release: ReleaseId
+    bucket: BucketName
+    prefix: ObjectPrefix = "openalex"
+
+
+class OpenAlexLoadResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    sources: LoadDatasetResult
+    works: LoadDatasetResult
+    abstracts: LoadDatasetResult
 
 
 class BatchDiffDownloadResult(BaseModel):

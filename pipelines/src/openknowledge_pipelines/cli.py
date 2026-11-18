@@ -23,6 +23,8 @@ from openknowledge_core.ingestion import (
     LoadDatasetResult,
     LoadDiff,
     LoadDiffResult,
+    OpenAlexLoad,
+    OpenAlexLoadResult,
     PinRelease,
 )
 from openknowledge_core.ingestion.families import ArchiveFamily, archive_family
@@ -443,6 +445,32 @@ def openalex_archive(release: str, bucket: str, prefix: str, dataset: str | None
     _require_managed_server((deployments.OPENALEX_LIMIT,))
     _settings(OpenAlexBatchSettings)
     _run_managed(lambda: deployments.openalex_batch_download(command))
+
+
+@openalex.command(
+    "load",
+    help=(
+        "Load an archived release into the OpenAlex tables through the Prefect flow. "
+        "Rerun it to resume."
+    ),
+)
+@click.option("--release", required=True, help=OA_RELEASE_HELP)
+@click.option("--bucket", required=True, help="Bucket holding the archive, without gs://.")
+@click.option("--prefix", default=OA_PREFIX, show_default=True, help=PREFIX_HELP)
+def openalex_load(release: str, bucket: str, prefix: str) -> None:
+    command = _command(OpenAlexLoad, OA_RULES, release=release, bucket=bucket, prefix=prefix)
+    settings = _settings(LoadSettings)
+
+    async def run() -> OpenAlexLoadResult:
+        from openknowledge_pipelines.flows.openalex_load import load_release
+
+        async with bootstrap.open_load_service(settings) as service:
+            flows = bootstrap.load_flows(
+                service, settings, parallelism=settings.openalex_load_parallelism
+            )
+            return await load_release(flows.dataset, command)
+
+    _run_load(run)
 
 
 @openalex.command("download-shard", help=DOWNLOAD_SHARD_HELP, short_help=DOWNLOAD_SHARD_HELP)

@@ -98,6 +98,10 @@ class TableLoader(Protocol):
 
     async def live_rows(self, dataset: DatasetName, release: ReleaseId) -> int: ...
 
+    async def broken_indexes(self, dataset: DatasetName, release: ReleaseId) -> int:
+        """Live rows of ``release`` whose abstract index was unreadable and loaded empty."""
+        ...
+
     async def duplicates(self, dataset: DatasetName, objects: Sequence[ObjectPath]) -> Duplicates:
         """Keys that repeat across the objects, which are read again."""
         ...

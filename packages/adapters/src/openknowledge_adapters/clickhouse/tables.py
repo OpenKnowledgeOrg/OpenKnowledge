@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from uuid import UUID
 
@@ -14,6 +15,12 @@ from openknowledge_adapters.clickhouse.load_sql import (
     removed_query,
     sql_sha256,
     upsert_query,
+)
+from openknowledge_adapters.clickhouse.parquet_sql import (
+    broken_indexes_query,
+    parquet_duplicates_parameters,
+    parquet_duplicates_query,
+    parquet_upsert_query,
 )
 from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.manifests import ObjectPath
@@ -67,8 +74,11 @@ class ClickHouseTables:
             archive=contract.archived,
             uuid=rows[0]["uuid"],
             has_rows=bool(rows[0]["total_rows"]),
-            load_sql_sha256=sql_sha256(upsert_query(contract)),
-            delete_sql_sha256=sql_sha256(delete_query(contract)),
+            load_sql_sha256=sql_sha256(_upsert(contract)),
+            # A Parquet table is a snapshot and never takes a delete, so it hashes its upsert.
+            delete_sql_sha256=sql_sha256(
+                _upsert(contract) if _parquet(contract) else delete_query(contract)
+            ),
             updates=contract.updates,
         )
 
@@ -84,7 +94,12 @@ class ClickHouseTables:
     async def load(self, request: LoadObject) -> int:
         contract = _contract(request.dataset)
         path = self._readable(request.object_ref.path)
-        query = delete_query(contract) if request.operation == "delete" else upsert_query(contract)
+        if request.operation == "delete":
+            if _parquet(contract):
+                raise TableRejected(f"{contract.table} is a snapshot and takes no deletes")
+            query = delete_query(contract)
+        else:
+            query = _upsert(contract)
         parameters = query_parameters(
             source_file=path.name, release=request.release, source_object=str(path)
         )
@@ -106,11 +121,28 @@ class ClickHouseTables:
         rows = await self._client.rows(query, table=contract.table, release=release)
         return int(rows[0]["rows"])
 
+    async def broken_indexes(self, dataset: DatasetName, release: ReleaseId) -> int:
+        query = broken_indexes_query(_contract(dataset))
+        if query is None:
+            return 0
+        rows = await self._client.rows(query, release=release)
+        return int(rows[0]["rows"])
+
     async def duplicates(self, dataset: DatasetName, objects: Sequence[ObjectPath]) -> Duplicates:
         names = [self._readable(path).name for path in objects]
-        rows = await self._client.rows(
-            duplicates_query(_contract(dataset), len(names)), **duplicates_parameters(names)
-        )
+        contract = _contract(dataset)
+        query_id = None
+        if _parquet(contract):
+            query, parameters = (
+                parquet_duplicates_query(contract),
+                parquet_duplicates_parameters(names),
+            )
+            # The same for a retry, which then replaces a query its client stopped waiting for.
+            glob = parameters["source_files"].encode()
+            query_id = f"duplicates-{contract.table}-{hashlib.sha256(glob).hexdigest()[:32]}"
+        else:
+            query, parameters = duplicates_query(contract, len(names)), duplicates_parameters(names)
+        rows = await self._client.rows(query, query_id=query_id, **parameters)
         return Duplicates.model_validate(rows[0])
 
     async def mark_removed(self, dataset: DatasetName, release: ReleaseId) -> int:
@@ -175,3 +207,12 @@ def _contract(dataset: DatasetName) -> DatasetContract:
         return contract_for(dataset)[1]
     except KeyError:
         raise TableRejected(f"no table contract for dataset {dataset}") from None
+
+
+def _parquet(contract: DatasetContract) -> bool:
+    source, _ = contract_for(contract.name)
+    return source.datasets[contract.archived].format == "parquet"
+
+
+def _upsert(contract: DatasetContract) -> str:
+    return parquet_upsert_query(contract) if _parquet(contract) else upsert_query(contract)
