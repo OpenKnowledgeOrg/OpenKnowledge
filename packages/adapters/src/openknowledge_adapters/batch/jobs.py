@@ -1,16 +1,18 @@
-"""Cloud Batch jobs over its REST API, one task per shard running okp s2 download-shard."""
+"""Cloud Batch jobs over its REST API, one task per shard: a download or a conversion."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
+from uuid import UUID
 
 import aiohttp
 from gcloud.aio.auth import Token
 
 from openknowledge_adapters.batch.config import BatchConfig
 from openknowledge_contracts.sources import SourceName
+from openknowledge_core.embeddings import CONVERT_FAMILY, ConvertJob
 from openknowledge_core.ingestion.errors import (
     TRANSIENT_STATUSES,
     BatchRejected,
@@ -32,6 +34,9 @@ CLI_GROUPS: Mapping[SourceName, str] = {"semantic-scholar": "s2", "openalex": "o
 JOB_PREFIXES: Mapping[SourceName, str] = {"semantic-scholar": "s2", "openalex": "oa"}
 # Jobs submitted before the source label existed are Semantic Scholar jobs.
 LEGACY_SOURCE: SourceName = "semantic-scholar"
+CONVERT_JOB_PREFIX = "specter2-"
+# Conversion reads the Semantic Scholar archive, so it shares that source's Batch slot.
+CONVERT_SOURCE: SourceName = "semantic-scholar"
 
 
 class _JobExists(Exception):
@@ -60,13 +65,21 @@ class CloudBatchJobs:
         self._parent = f"projects/{config.project}/locations/{config.region}"
 
     async def submit(self, job: ShardJob) -> str:
-        name = f"{self._parent}/jobs/{job_id(job)}"
+        return await self._submit(job_id(job), job.operation_id, job_spec(self._config, job))
+
+    async def submit_convert(self, job: ConvertJob) -> str:
+        return await self._submit(
+            convert_job_id(job), job.operation_id, convert_spec(self._config, job)
+        )
+
+    async def _submit(self, job: str, operation_id: UUID, spec: dict[str, Any]) -> str:
+        name = f"{self._parent}/jobs/{job}"
         try:
             await self._call(
                 "POST",
                 f"{self._parent}/jobs",
-                params={"jobId": job_id(job), "requestId": str(job.operation_id)},
-                json=job_spec(self._config, job),
+                params={"jobId": job, "requestId": str(operation_id)},
+                json=spec,
             )
         except _JobExists:
             pass
@@ -76,8 +89,9 @@ class CloudBatchJobs:
             ) from None
         return name
 
-    async def running(self, family: ArchiveFamily = ArchiveFamily.CORE) -> dict[str, bool]:
+    async def running(self, family: str = ArchiveFamily.CORE) -> dict[str, bool]:
         """Inspect all pages before allowing family cleanup or a new submission."""
+        source = family.source if isinstance(family, ArchiveFamily) else CONVERT_SOURCE
         found: dict[str, bool] = {}
         params: dict[str, str] = {}
         while True:
@@ -86,19 +100,23 @@ class CloudBatchJobs:
                 state = job.get("status", {}).get("state")
                 if "operation-id" in job.get("labels", {}) and state not in ENDED:
                     labels = job["labels"]
-                    if labels.get("source", LEGACY_SOURCE) != family.source:
+                    if labels.get("source", LEGACY_SOURCE) != source:
                         continue
                     job_family = labels.get("archive-family")
                     if (
                         job_family is None
-                        and family.source == LEGACY_SOURCE
+                        and source == LEGACY_SOURCE
                         and ARCHIVE_DATASETS.get(labels.get("dataset", "")) == ArchiveFamily.CORE
                     ):
                         job_family = ArchiveFamily.CORE.value
-                    if job_family != family.value:
+                    if job_family != family:
+                        blocker = (
+                            f"Active Batch job {job['name']} of another family blocks conversion"
+                            if family == CONVERT_FAMILY
+                            else f"Active foreign or legacy download job {job['name']}"
+                        )
                         raise SharedCapacityError(
-                            f"Active foreign or legacy download job {job['name']}; "
-                            "drain it to a terminal state before retrying. "
+                            f"{blocker}; drain it to a terminal state before retrying. "
                             "This lookup did not cancel or wait on jobs"
                         )
                     found[str(job["name"])] = state in QUEUED
@@ -124,10 +142,16 @@ class CloudBatchJobs:
                         return ENDED[state]
                     await self._sleep(self._config.poll_seconds)
         except TimeoutError:
+            waiters = (
+                "a rerun of okp embeddings convert waits for it; archive downloads refuse to "
+                "start until it ends"
+                if name.rsplit("/", 1)[-1].startswith(CONVERT_JOB_PREFIX)
+                else "same-family downloads wait for it once started; "
+                "other families refuse to start"
+            )
             raise BatchTimedOut(
                 f"Cloud Batch job {name} did not finish within "
-                f"{self._config.wait_timeout_seconds:g}s and may still be running; "
-                "same-family downloads wait for it once started; other families refuse to start. "
+                f"{self._config.wait_timeout_seconds:g}s and may still be running; {waiters}. "
                 "Inspect and drain it if it hangs"
             ) from None
 
@@ -176,22 +200,61 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
     command += ["--bucket", job.bucket, "--prefix", job.prefix]
     if job.from_release is not None and job.part is not None:
         command += ["--from-release", job.from_release, "--part", job.part]
+    labels = {
+        "source": job.source,
+        "archive-family": archive_family(job.dataset, job.source).value,
+        "dataset": job.dataset.replace("_", "-"),
+        "release": job.release_id,
+        "part": job.part or "base",
+    }
+    # Each task makes one listing call with the S2 key, which allows one request
+    # per second; the retries' jitter spreads the tasks that start together.
+    return _spec(config, command, job.shards, job.operation_id, labels, config.secrets)
+
+
+def convert_job_id(job: ConvertJob) -> str:
+    return f"{CONVERT_JOB_PREFIX}{job.release}-{job.part}-{job.operation_id.hex}"
+
+
+def convert_spec(config: BatchConfig, job: ConvertJob) -> dict[str, Any]:
+    command = ["embeddings", "convert-shard", "--release", job.release]
+    command += ["--raw-bucket", job.raw_bucket, "--prefix", job.prefix]
+    command += ["--curated-bucket", job.curated_bucket]
+    if job.from_release is not None and job.part != "base":
+        command += ["--from-release", job.from_release, "--part", job.part]
+    labels = {
+        "source": CONVERT_SOURCE,
+        "archive-family": CONVERT_FAMILY,
+        "dataset": "embeddings-specter-v2",
+        "release": job.release,
+        "part": job.part,
+    }
+    # The tasks read and write GCS only, so they get no secret.
+    return _spec(config, command, job.shards, job.operation_id, labels, {})
+
+
+def _spec(
+    config: BatchConfig,
+    command: list[str],
+    shards: tuple[int, ...],
+    operation_id: UUID,
+    labels: dict[str, str],
+    secrets: dict[str, str],
+) -> dict[str, Any]:
     return {
         "taskGroups": [
             {
                 # One task per entry; okp reads its shard from OKP_SHARD.
-                "taskEnvironments": [{"variables": {"OKP_SHARD": str(s)}} for s in job.shards],
-                # Each task makes one listing call with the S2 key, which allows one request
-                # per second; the retries' jitter spreads the tasks that start together.
-                "parallelism": min(config.parallelism, len(job.shards)),
+                "taskEnvironments": [{"variables": {"OKP_SHARD": str(s)}} for s in shards],
+                "parallelism": min(config.parallelism, len(shards)),
                 "taskSpec": {
                     "runnables": [{"container": {"imageUri": config.image, "commands": command}}],
                     "environment": {
                         "variables": {
                             **config.environment,
-                            "OKP_BATCH_OPERATION_ID": job.operation_id.hex,
+                            "OKP_BATCH_OPERATION_ID": operation_id.hex,
                         },
-                        "secretVariables": config.secrets,
+                        "secretVariables": secrets,
                     },
                     "maxRunDuration": f"{config.max_run_seconds}s",
                 },
@@ -211,13 +274,6 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
                 "networkInterfaces": [{"network": config.network, "subnetwork": config.subnetwork}]
             },
         },
-        "labels": {
-            "source": job.source,
-            "archive-family": archive_family(job.dataset, job.source).value,
-            "dataset": job.dataset.replace("_", "-"),
-            "release": job.release_id,
-            "part": job.part or "base",
-            "operation-id": job.operation_id.hex,
-        },
+        "labels": {**labels, "operation-id": operation_id.hex},
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
     }

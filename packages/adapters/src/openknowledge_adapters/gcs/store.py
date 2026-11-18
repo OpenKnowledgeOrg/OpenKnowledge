@@ -1,4 +1,4 @@
-"""Create-only objects in Google Cloud Storage over gcloud-aio-storage."""
+"""Objects in Google Cloud Storage over gcloud-aio-storage, created once or replaced from a file."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 import threading
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
+from pathlib import Path
 from typing import Any, cast
 
 import aiohttp
@@ -155,6 +156,44 @@ class GcsArtifactStore:
         if rejected is not None:
             raise rejected
         raise StoreUnavailable(f"GCS could not upload {path} ({kind}); rerun later")
+
+    async def replace_file(
+        self, path: ObjectPath, file: Path, *, content_type: str
+    ) -> StoredObject:
+        try:
+            with await asyncio.to_thread(file.open, "rb") as data:
+                metadata = await self._storage.upload(
+                    path.bucket,
+                    path.name,
+                    data,
+                    content_type=content_type,
+                    force_resumable_upload=True,
+                    timeout=self._timeout(os.fstat(data.fileno()).st_size),
+                )
+        except Exception as exc:
+            _, rejected = _upload_outcome(path, exc)
+            error = rejected or StoreUnavailable(
+                f"GCS could not upload {path} ({type(exc).__name__}); rerun later"
+            )
+        else:
+            return _stored(path, metadata)
+        raise error
+
+    async def read_range(self, bucket: str, name: str, start: int, length: int) -> bytes:
+        """At most ``length`` bytes from ``start``, fewer where the object ends first."""
+        path = ObjectPath(bucket=bucket, name=name)
+        headers = {**IDENTITY, "range": f"bytes={start}-{start + length - 1}"}
+        try:
+            return await self._storage.download(
+                bucket, name, headers=headers, timeout=self._timeout(length)
+            )
+        except aiohttp.ClientResponseError as exc:
+            if exc.status == 416 and _from_storage(exc):  # the object ends before ``start``
+                return b""
+            error = _failure("read", path, exc)
+        except Exception as exc:
+            error = _unreachable("read", path, exc)
+        raise error
 
     async def open_read(self, ref: ObjectRef) -> ByteStream:
         before = await self.stat(ref.path)

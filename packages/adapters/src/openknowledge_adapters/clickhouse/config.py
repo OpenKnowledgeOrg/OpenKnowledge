@@ -12,6 +12,6 @@ class ClickHouseConfig(BaseModel):
     user: str
     password: SecretStr
     database: str = "openknowledge"
-    raw_bucket: BucketName
-    """The bucket the server's ``raw`` named collection reads."""
+    raw_bucket: BucketName | None = None
+    """The bucket the server's ``raw`` named collection reads; None for a reader."""
     timeout_seconds: PositiveFloat | None

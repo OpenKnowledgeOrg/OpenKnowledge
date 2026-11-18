@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -11,9 +11,17 @@ from importlib.metadata import version
 from typing import TYPE_CHECKING
 
 from openknowledge_adapters import batch, clickhouse, gcs, openalex, opensearch, semantic_scholar
+from openknowledge_adapters.clickhouse.embedding_index import write_index
 from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
 from openknowledge_contracts.sources import SOURCES
+from openknowledge_core.embeddings import (
+    ConvertJobs,
+    EmbeddingConversion,
+    EmbeddingIndexLoad,
+    EmbeddingVectors,
+    lookup_vectors,
+)
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
     LoadDataset,
@@ -33,6 +41,7 @@ from openknowledge_core.search.commands import IndexPapersResult
 from openknowledge_pipelines.settings import (
     BatchJobSettings,
     BatchSettings,
+    ClickHouseSettings,
     CommonSettings,
     LoadSettings,
     OpenAlexBatchSettings,
@@ -127,13 +136,13 @@ def _gcs(settings: CommonSettings) -> gcs.GcsConfig:
 
 
 def _clickhouse(
-    settings: LoadSettings, timeout_seconds: float | None
+    settings: ClickHouseSettings, timeout_seconds: float | None
 ) -> clickhouse.ClickHouseConfig:
     return clickhouse.ClickHouseConfig(
         url=settings.clickhouse_url,
         user=settings.clickhouse_user,
         password=settings.clickhouse_password,
-        raw_bucket=settings.clickhouse_raw_bucket,
+        raw_bucket=settings.clickhouse_raw_bucket if isinstance(settings, LoadSettings) else None,
         timeout_seconds=timeout_seconds,
     )
 
@@ -232,6 +241,47 @@ def _batch_config(
         environment={"OKP_IMAGE_DIGEST": settings.image_digest},
         secrets=secrets,
     )
+
+
+@asynccontextmanager
+async def open_embedding_conversion(
+    settings: CommonSettings,
+) -> AsyncGenerator[EmbeddingConversion, None]:
+    async with gcs.connect(_gcs(settings)) as store:
+        yield EmbeddingConversion(store, write_index)
+
+
+@asynccontextmanager
+async def open_index_load(settings: LoadSettings) -> AsyncGenerator[EmbeddingIndexLoad, None]:
+    async with (
+        gcs.connect(_gcs(settings)) as store,
+        clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
+    ):
+        yield EmbeddingIndexLoad(
+            store=store,
+            index=ch.locations,
+            applied=ch.applied,
+            producer=producer(settings),
+            clock=lambda: datetime.now(UTC),
+        )
+
+
+@asynccontextmanager
+async def open_vector_lookup(
+    settings: ClickHouseSettings,
+) -> AsyncGenerator[Callable[[Iterable[int], str], Awaitable[EmbeddingVectors]], None]:
+    async with (
+        gcs.connect(_gcs(settings)) as store,
+        clickhouse.connect(_clickhouse(settings, settings.clickhouse_read_timeout_seconds)) as ch,
+    ):
+        yield lambda corpusids, bucket: lookup_vectors(corpusids, ch.locations, store, bucket)
+
+
+@asynccontextmanager
+async def open_conversion_jobs(settings: BatchJobSettings) -> AsyncGenerator[ConvertJobs, None]:
+    config = _batch_config(settings, parallelism=settings.batch_parallelism, secrets={})
+    async with batch.connect(config) as jobs:
+        yield jobs
 
 
 def batch_download_flows(

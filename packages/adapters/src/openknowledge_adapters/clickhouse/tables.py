@@ -70,7 +70,7 @@ def swap_statements(table: str) -> tuple[str, str]:
 
 
 class ClickHouseTables:
-    def __init__(self, client: ClickHouseClient, *, raw_bucket: str) -> None:
+    def __init__(self, client: ClickHouseClient, *, raw_bucket: str | None) -> None:
         self._client = client
         self._raw_bucket = raw_bucket
 
