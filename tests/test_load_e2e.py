@@ -486,6 +486,7 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
     deployments.ensure_limits()
     env = {
         "OKP_CLICKHOUSE_URL": f"http://127.0.0.1:{ports['CLICKHOUSE_PORT']}",
+        "OKP_CLICKHOUSE_USER": "openknowledge",
         "CLICKHOUSE_PASSWORD": "openknowledge",
         "OKP_CLICKHOUSE_RAW_BUCKET": BUCKET,
         "OKP_READ_TABLES_MAX_DELTA_SHARE": "1",
@@ -533,6 +534,12 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
         result = build(*args)
         assert result.exit_code == 0, result.output
         built = json.loads(result.output.splitlines()[-1])
+        # The CLI runs the budget query as openknowledge with the grants in users.xml.
+        budget = built["budget"]
+        assert budget["memory_bytes"] >= 10**9 and budget["memory_bytes"] % 10**9 == 0
+        assert budget["spill_bytes"] == budget["memory_bytes"] // 2
+        assert 1 <= budget["max_threads"] <= max(1, budget["memory_bytes"] // (4 * 10**9))
+        assert budget["max_threads"] <= (os.cpu_count() or 1)
         assert built["paths"] == {"papers": "full", "citations": "full", "openalex": "full"}
         assert built["source_releases"] == {
             "papers": "2026-10-19",

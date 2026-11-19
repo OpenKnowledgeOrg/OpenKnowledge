@@ -29,6 +29,7 @@ from openknowledge_core.ingestion.read_tables import (
     BuildReadTablesResult,
     GroupPlan,
     GroupState,
+    ReadTableBudget,
     ReadTableResult,
     ReadTablesPath,
     group_release,
@@ -62,24 +63,18 @@ SOURCES = {
     # The abstracts follow the crosswalk built just before them.
     BEST: best_select(f"{XWALK}_new", None),
 }
-MEMORY = (
-    "SETTINGS max_memory_usage = 8000000000, max_execution_time = 14400, max_insert_threads = 1"
-)
-SETTINGS = f"{MEMORY}, "
+GB = 10**9
 EDGE_BLOCKS = "min_insert_block_size_rows = 50000000, min_insert_block_size_bytes = 0"
-SPILL = (
-    "join_algorithm = 'grace_hash', grace_hash_join_initial_buckets = 64, "
-    "max_bytes_before_external_sort = 4000000000, "
-    "max_bytes_before_external_group_by = 4000000000"
-)
+PAPER_BLOCKS = "min_insert_block_size_rows = 0, min_insert_block_size_bytes = 1073741824"
+GRACE_HASH = "join_algorithm = 'grace_hash', grace_hash_join_initial_buckets = 64"
 BLOCKS = {
     # Paper rows carry titles: 50M of them would not fit the memory limit, so cap blocks by bytes.
-    PAPERS: "min_insert_block_size_rows = 0, min_insert_block_size_bytes = 1073741824",
+    PAPERS: PAPER_BLOCKS,
     OUT: EDGE_BLOCKS,
     IN: EDGE_BLOCKS,
-    XWALK: f"{EDGE_BLOCKS}, {SPILL}",
+    XWALK: f"{EDGE_BLOCKS}, {GRACE_HASH}",
+    BEST: f"{PAPER_BLOCKS}, {GRACE_HASH}",
 }
-BLOCKS[BEST] = f"{BLOCKS[PAPERS]}, {SPILL}"
 BYTES_PER_CITATION = 28
 """(4 + 4 + 5.31 + 5.31) bytes for both new copies with IDs, with 50% merge room."""
 BYTES_PER_PAPER = 100
@@ -125,7 +120,41 @@ _RELEASE = TypeAdapter(ReleaseId)
 log = logging.getLogger(__name__)
 
 
-def delta_sql(group: str, start: ReleaseId, end: ReleaseId, max_keys: int) -> list[str]:
+def build_budget(limit: int, ratio: float, cores: int) -> ReadTableBudget:
+    """Use half of RAM, but at most 60% of the server memory limit, rounded down to whole GB.
+
+    RAM is the limit over its RAM ratio; a zero ratio means the limit was set alone. Budget
+    4 GB per thread for headroom over the two-thread probe (~2 GiB total), and spill at half
+    the query cap to leave space for merging spilled data.
+    """
+    if limit <= 0 or ratio < 0 or cores <= 0:
+        raise TableRejected("ClickHouse reported an invalid memory limit or CPU count")
+    cap = limit * 3 // 5
+    if ratio > 0:
+        cap = min(cap, int(limit / ratio) // 2)
+    memory = cap // GB * GB
+    if memory <= 0:
+        raise TableRejected(f"ClickHouse memory limit {limit} is too small for read tables")
+    return ReadTableBudget(
+        memory_bytes=memory,
+        max_threads=max(1, min(cores, memory // (4 * GB))),
+        spill_bytes=memory // 2,
+    )
+
+
+def _settings(budget: ReadTableBudget, *, single_thread: bool = False) -> str:
+    threads = 1 if single_thread else budget.max_threads
+    return (
+        f"SETTINGS max_memory_usage = {budget.memory_bytes}, max_threads = {threads}, "
+        "max_execution_time = 14400, max_insert_threads = 1, "
+        f"max_bytes_before_external_sort = {budget.spill_bytes}, "
+        f"max_bytes_before_external_group_by = {budget.spill_bytes}"
+    )
+
+
+def delta_sql(
+    group: str, start: ReleaseId, end: ReleaseId, max_keys: int, budget: ReadTableBudget
+) -> list[str]:
     """Collect the keys ``group``'s sources wrote in ``(start, end]``, deletions included.
 
     It stops one key past ``max_keys``, so a delta over the cap never has to fit in memory. A
@@ -142,7 +171,7 @@ def delta_sql(group: str, start: ReleaseId, end: ReleaseId, max_keys: int) -> li
             f"INSERT INTO {delta} SELECT DISTINCT {KEY[group]} FROM {group} "
             f"WHERE {window} "
             # One thread: each would hold its own set of up to max_keys keys.
-            f"LIMIT {max_keys + 1} {MEMORY}, max_threads = 1",
+            f"LIMIT {max_keys + 1} {_settings(budget, single_thread=True)}",
         ]
     sources = " UNION ALL ".join(
         f"SELECT {KEY[group]} AS key FROM {source} WHERE {window}"
@@ -154,13 +183,13 @@ def delta_sql(group: str, start: ReleaseId, end: ReleaseId, max_keys: int) -> li
         "ENGINE = MergeTree ORDER BY key",
         f"INSERT INTO {delta} (key, expanded) SELECT DISTINCT key, false FROM ({sources}) "
         f"WHERE key NOT IN (SELECT key FROM {delta} WHERE NOT expanded) "
-        f"LIMIT {max_keys + 1} {MEMORY}, max_threads = 1",
+        f"LIMIT {max_keys + 1} {_settings(budget, single_thread=True)}",
         f"INSERT INTO {delta} (key, expanded) SELECT corpusid, true FROM ({expansion_sql(delta)}) "
-        f"{MEMORY}, {SPILL}",
+        f"{_settings(budget)}, {GRACE_HASH}",
     ]
 
 
-def apply_sql(group: str) -> list[str]:
+def apply_sql(group: str, budget: ReadTableBudget) -> list[str]:
     """Replace the rows of the delta keys in ``group``'s read tables with their current rows.
 
     Deleting every delta key first makes a rerun after a partial run reach the same state.
@@ -186,16 +215,17 @@ def apply_sql(group: str) -> list[str]:
         table: special.get(table, f"{SOURCES[table]} AND {touched[table]}") for table in tables
     }
     return deletes + [
-        f"INSERT INTO {table} ({COLUMNS[table]}) {selects[table]} {SETTINGS}{BLOCKS[table]}"
+        f"INSERT INTO {table} ({COLUMNS[table]}) {selects[table]} "
+        f"{_settings(budget)}, {BLOCKS[table]}"
         for table in tables
     ]
 
 
-def in_only_sql() -> list[str]:
+def in_only_sql(budget: ReadTableBudget) -> list[str]:
     """Rebuild only the incoming edges into ``_new``, from the live outgoing ones."""
     return [
         f"CREATE TABLE {IN}_new AS {IN}",
-        f"INSERT INTO {IN}_new ({COLUMNS[IN]}) {EDGES_IN} {SETTINGS}{BLOCKS[IN]}",
+        f"INSERT INTO {IN}_new ({COLUMNS[IN]}) {EDGES_IN} {_settings(budget)}, {BLOCKS[IN]}",
     ]
 
 
@@ -260,9 +290,21 @@ class ClickHouseReadTables:
             if group not in KEPT_DELTA:
                 await self._client.post(f"DROP TABLE IF EXISTS {table}")
 
+    async def _build_budget(self) -> ReadTableBudget:
+        rows = await self._client.rows(
+            "SELECT getServerSetting('max_server_memory_usage') AS memory_limit, "
+            "getServerSetting('max_server_memory_usage_to_ram_ratio') AS memory_ratio, "
+            "toUInt64(getSetting('max_threads')) AS cores SETTINGS max_threads = 'auto'"
+        )
+        if not rows:
+            raise TableRejected("ClickHouse did not report server settings for read tables")
+        row = rows[0]
+        return build_budget(int(row["memory_limit"]), float(row["memory_ratio"]), int(row["cores"]))
+
     async def build(
         self, producer: Producer, clock: Callable[[], datetime], *, full: bool = False
     ) -> BuildReadTablesResult:
+        budget = await self._build_budget()
         releases: dict[str, ReleaseId] = {}
         uuids: dict[str, UUID] = {}
         for name in S2_SOURCES:
@@ -289,10 +331,15 @@ class ClickHouseReadTables:
                 for name in groups:
                     state = await self._state(name, releases, uuids, live, held)
                     plans[name] = plan_group(state, full=False)
-        result = BuildReadTablesResult(source_releases=releases, tables={})
+        result = BuildReadTablesResult(source_releases=releases, tables={}, budget=budget)
         for unit in REBUILT_TOGETHER:
             built = await self._unit(
-                tuple(name for name in unit if name in groups), plans, releases, producer, clock
+                tuple(name for name in unit if name in groups),
+                plans,
+                releases,
+                producer,
+                clock,
+                budget,
             )
             result = result.model_copy(
                 update={
@@ -310,24 +357,27 @@ class ClickHouseReadTables:
         releases: Mapping[str, ReleaseId],
         producer: Producer,
         clock: Callable[[], datetime],
+        budget: ReadTableBudget,
     ) -> BuildReadTablesResult:
         """Bring groups that are rebuilt together current; ``plans`` is empty for a full build."""
         if not groups:
             return BuildReadTablesResult(source_releases=dict(releases), tables={})
         if any(name not in plans or plans[name].path is ReadTablesPath.FULL for name in groups):
-            return await self._full(producer, clock, releases, groups=groups)
+            return await self._full(producer, clock, releases, budget, groups=groups)
         results: dict[str, ReadTableResult] = {}
         touched: dict[str, int] = {}
         for name in groups:
             plan = plans[name]
             if plan.path is ReadTablesPath.IN_ONLY or plan.in_only_first:
-                results[IN] = await self._in_only(plan.start or plan.end, producer, clock)
+                results[IN] = await self._in_only(plan.start or plan.end, producer, clock, budget)
             if plan.path is ReadTablesPath.INCREMENTAL and plan.start is not None:
                 touched[name], tables = await self._incremental(
-                    name, plan.start, plan.end, producer, clock
+                    name, plan.start, plan.end, producer, clock, budget
                 )
                 if tables is None:
-                    return await self._full(producer, clock, releases, touched, groups=groups)
+                    return await self._full(
+                        producer, clock, releases, budget, touched, groups=groups
+                    )
                 results |= tables
         return BuildReadTablesResult(
             source_releases=dict(releases),
@@ -476,13 +526,17 @@ class ClickHouseReadTables:
         return bool(found)
 
     async def _in_only(
-        self, release: ReleaseId, producer: Producer, clock: Callable[[], datetime]
+        self,
+        release: ReleaseId,
+        producer: Producer,
+        clock: Callable[[], datetime],
+        budget: ReadTableBudget,
     ) -> ReadTableResult:
         started = monotonic()
         async with self._stage("read tables: in-only"):
             outgoing = (await self._counts(OUT))[OUT]
             await self._require_free(outgoing * BYTES_PER_IN_ONLY, f"rebuilding {IN}")
-            create, insert = in_only_sql()
+            create, insert = in_only_sql(budget)
             await self._run(create)
             rows = await self._run(insert)
             if (await self._counts(f"{IN}_new"))[f"{IN}_new"] != outgoing:
@@ -499,6 +553,7 @@ class ClickHouseReadTables:
         end: ReleaseId,
         producer: Producer,
         clock: Callable[[], datetime],
+        budget: ReadTableBudget,
     ) -> tuple[int, dict[str, ReadTableResult] | None]:
         """Take ``source``'s diffs into its read tables in place; no tables to rebuild them all."""
         started = monotonic()
@@ -509,7 +564,7 @@ class ClickHouseReadTables:
                 (self._max_delta_keys + 1) * BYTES_PER_SCRATCH_KEY + DELTA_HEADROOM,
                 f"collecting the {source} delta keys",
             )
-            for statement in delta_sql(source, start, end, self._max_delta_keys):
+            for statement in delta_sql(source, start, end, self._max_delta_keys, budget):
                 await self._run(statement)
             touched = (await self._counts(DELTA[source]))[DELTA[source]]
             share = SHARE_OF.get(source)
@@ -531,7 +586,7 @@ class ClickHouseReadTables:
             )
         async with self._stage(f"read tables: {source} apply"):
             written: dict[str, int] = {}
-            for statement in apply_sql(source):
+            for statement in apply_sql(source, budget):
                 rows = await self._run(statement)
                 if statement.startswith("INSERT"):
                     written[statement.split()[2]] = rows
@@ -561,6 +616,7 @@ class ClickHouseReadTables:
         producer: Producer,
         clock: Callable[[], datetime],
         releases: Mapping[str, ReleaseId],
+        budget: ReadTableBudget,
         touched: Mapping[str, int] | None = None,
         *,
         groups: tuple[str, ...],
@@ -576,7 +632,7 @@ class ClickHouseReadTables:
                 await self._client.post(f"CREATE TABLE {table}_new AS {table}")
                 rows = await self._client.written(
                     f"INSERT INTO {table}_new ({COLUMNS[table]}) {SOURCES[table]} "
-                    f"{SETTINGS}{BLOCKS[table]}",
+                    f"{_settings(budget)}, {BLOCKS[table]}",
                     query_id=QUERY_ID,
                 )
                 results[table] = ReadTableResult(rows=rows, seconds=monotonic() - started)

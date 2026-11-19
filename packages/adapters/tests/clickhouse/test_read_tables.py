@@ -18,6 +18,7 @@ from openknowledge_adapters.clickhouse.read_tables import (
     DELTA,
     DELTA_HEADROOM,
     ClickHouseReadTables,
+    build_budget,
 )
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.tables.clickhouse import version_expression
@@ -26,6 +27,7 @@ from openknowledge_core.ingestion.errors import TableRejected, TableUnavailable
 from openknowledge_core.ingestion.read_tables import (
     GROUPS,
     READ_TABLES,
+    ReadTableBudget,
     ReadTablesPath,
 )
 from tests.fakes.ports import NEXT, PRODUCER, RELEASE, applied_release, clock
@@ -36,6 +38,23 @@ S2_TABLES = GROUPS["papers"] + GROUPS["citations"]
 QUARTERLY = {table: f"{table}@openalex_works" for table in GROUPS["openalex"]}
 OA_UUID = {"openalex_works": 50, "openalex_abstracts": 51}
 FULL, INCREMENTAL, CURRENT = ReadTablesPath.FULL, ReadTablesPath.INCREMENTAL, ReadTablesPath.CURRENT
+
+
+@pytest.mark.parametrize(
+    ("limit", "ratio", "cores", "memory", "threads"),
+    [
+        (14_760_000_000, 0.9, 2, 8 * 10**9, 2),
+        (230_400_000_000, 0.9, 64, 128 * 10**9, 32),
+        (230_400_000_000, 0.9, 8, 128 * 10**9, 8),
+        # An explicit cap below ratio x RAM: stay under the server's own limit.
+        (4 * 10**9, 0.4, 2, 2 * 10**9, 1),
+        (10 * 10**9, 0, 4, 6 * 10**9, 1),
+    ],
+)
+def test_build_budget(limit: int, ratio: float, cores: int, memory: int, threads: int) -> None:
+    assert build_budget(limit, ratio, cores) == ReadTableBudget(
+        memory_bytes=memory, max_threads=threads, spill_bytes=memory // 2
+    )
 
 
 @pytest.mark.parametrize("table", READ_TABLES)
@@ -164,6 +183,11 @@ class FakeClickHouse:
             assert "replace_running_query = 1" in query
             self.replaced.add(params["query_id"])
             rows = []
+        elif query.startswith("SELECT getServerSetting("):
+            assert "getServerSetting('max_server_memory_usage_to_ram_ratio')" in query
+            assert "FROM" not in query
+            assert "SETTINGS max_threads = 'auto'" in query
+            rows = [{"memory_limit": "230400000000", "memory_ratio": 0.9, "cores": "16"}]
         elif query.startswith("SELECT 1 FROM applied"):
             mine = [
                 found
@@ -239,6 +263,16 @@ class FakeClickHouse:
             assert params["query_id"] == "citation-edges"
             name = query.split()[2]
             source = next((source for source, delta in DELTA.items() if delta == name), None)
+            threads = (
+                1
+                if source is not None and "SELECT DISTINCT" in query.partition(" FROM ")[0]
+                else 16
+            )
+            assert f"max_threads = {threads}," in query
+            assert "max_memory_usage = 128000000000," in query
+            assert "max_execution_time = 14400, max_insert_threads = 1," in query
+            assert "max_bytes_before_external_sort = 64000000000," in query
+            assert "max_bytes_before_external_group_by = 64000000000" in query
             if source is not None:
                 written = self.counts[name] = self.touched[source]
             elif name.endswith("_new"):
@@ -364,6 +398,9 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         result = await edges.build(PRODUCER, clock)
         assert result.source_releases == {"papers": NEXT, "citations": NEXT, "abstracts": NEXT}
         assert result.paths == {"papers": FULL, "citations": FULL, "openalex": CURRENT}
+        assert result.budget == ReadTableBudget(
+            memory_bytes=128 * 10**9, max_threads=16, spill_bytes=64 * 10**9
+        )
         assert await edges.is_current(result.source_releases)
     assert [name for name, state in stages if state == "completed"] == [
         "read tables: recovery and plan",
@@ -373,6 +410,7 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         "read tables: publish",
     ]
     assert server.staging == {}
+    assert sum(query.startswith("SELECT getServerSetting(") for query in server.events) == 2
     # One insert, so a failure cannot leave some tables marked and others not.
     for name, line in zip(S2_TABLES, server.markers[-1].splitlines(), strict=True):
         recorded = json.loads(line)
