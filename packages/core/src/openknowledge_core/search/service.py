@@ -5,6 +5,10 @@ the same, and every write uses OpenSearch's ``external_gte`` versioning. So a sl
 again: sources always read the latest rows, so versions only rise and an equal version is
 accepted again. An older document version is refused while OpenSearch remembers it; deleted
 versions are dropped after ``index.gc_deletes``.
+
+An abstract from OpenAlex has no row version of its own, so every document of an index built
+from OpenAlex release D is at least ``D * 2``: D is fixed for the index, so the version still
+never falls, and an S2 row older than D that replaces OpenAlex text is not refused.
 """
 
 from __future__ import annotations
@@ -29,32 +33,35 @@ from openknowledge_core.search.models import (
     Journal,
     SearchDocument,
     SourceRows,
+    release_version,
 )
 from openknowledge_core.search.ports import SearchSink, SearchSource
 
 BULK_BYTES = 5 * 1024 * 1024
 
 
-def document_operation(rows: SourceRows, contract_version: int) -> BulkOperation | None:
+def document_operation(
+    rows: SourceRows, contract_version: int, floor: int = 0
+) -> BulkOperation | None:
     """The write one corpus ID needs, or None for text whose paper the table never had.
 
-    A papers tombstone becomes a delete at the largest version of the three rows, which is the
-    tombstone's unless an abstract or TLDR row is newer, so the delete is never below the
+    A papers tombstone becomes a delete at the largest version of the three rows and ``floor``,
+    which is the tombstone's unless another is larger, so the delete is never below the
     document it removes. An abstract or TLDR tombstone removes that text at its version.
     """
     paper = rows.paper
     if paper is None:
         return None
-    abstract = rows.abstract
     tldr = rows.tldr
-    version = max(row.version for row in (paper, abstract, tldr) if row is not None)
+    version = max(floor, *(row.version for row in (paper, rows.abstract, tldr) if row is not None))
     if paper.is_deleted:
         return DeleteDocument(id=str(paper.corpusid), version=version)
     known = ExternalIds.model_fields
     document = SearchDocument(
         corpusid=str(paper.corpusid),
         title=paper.title,
-        abstract=None if abstract is None or abstract.is_deleted else abstract.abstract,
+        abstract=rows.best.abstract if rows.best else None,
+        abstract_source=rows.best.source if rows.best else None,
         tldr=None if tldr is None or tldr.is_deleted else tldr.text,
         authors=paper.authors,
         venue=paper.venue,
@@ -126,12 +133,13 @@ class SearchIndexService:
             )
             rows = await self._source.diff(command.from_release, command.release, low, high)
             created = False
+        floor = release_version(command.openalex_release) if command.openalex_release else 0
         written = deleted = requests = 0
         batch: list[BulkOperation] = []
         size = 0
         async with aclosing(rows):
             async for found in rows:
-                operation = document_operation(found, self._contract.version)
+                operation = document_operation(found, self._contract.version, floor)
                 if operation is None:
                     continue
                 batch.append(operation)

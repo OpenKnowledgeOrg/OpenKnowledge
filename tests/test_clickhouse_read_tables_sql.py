@@ -27,6 +27,7 @@ from openknowledge_adapters.clickhouse.read_tables import (
     delta_sql,
     in_only_sql,
 )
+from openknowledge_adapters.clickhouse.search import BASE_QUERY, DIFF_QUERY
 from openknowledge_core.ingestion.read_tables import GROUPS
 from tests.clickhouse_local import clickhouse_local, needs_clickhouse, up
 
@@ -409,3 +410,25 @@ def test_apply_keeps_the_best_abstract_of_papers_that_only_shared_a_work(tmp_pat
         {"corpusid": 2, "shared_work": False},
         {"corpusid": 2},
     ]
+
+
+@needs_clickhouse
+@pytest.mark.parametrize("query", [BASE_QUERY, DIFF_QUERY])
+def test_search_leaves_out_abstracts_of_shared_works(query: str, tmp_path: Path) -> None:
+    sql = f"""
+        {up()}
+        INSERT INTO papers (corpusid, source_release, is_deleted)
+        VALUES (1, '2026-10-08', 0), (2, '2026-10-08', 0), (3, '2026-10-08', 0);
+        INSERT INTO paper_xwalk (corpusid, work_id, match_key, rank, chosen, shared_work)
+        VALUES (1, 10, 'doi', 1, 1, 1), (2, 10, 'doi', 1, 1, 1), (3, 30, 'doi', 1, 1, 0);
+        INSERT INTO paper_abstract_best (corpusid, abstract, source, work_id)
+        VALUES (1, 'OA ten', 'openalex', 10), (2, 'S2 two', 's2', NULL),
+               (3, 'OA three', 'openalex', 30);
+        {query} FORMAT JSONEachRow;
+    """
+    rows = clickhouse_local(sql, tmp_path, low="0", high="9", from_release="2026-10-01")
+    assert {row["corpusid"]: row["best_abstract"] for row in rows} == {
+        1: None,
+        2: "S2 two",
+        3: "OA three",
+    }

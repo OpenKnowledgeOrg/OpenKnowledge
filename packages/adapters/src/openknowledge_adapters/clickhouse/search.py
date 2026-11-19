@@ -16,7 +16,13 @@ from pydantic import ValidationError
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_core.ingestion.errors import TableRejected
-from openknowledge_core.search.models import AbstractRow, PaperRow, SourceRows, TldrRow
+from openknowledge_core.search.models import (
+    AbstractRow,
+    BestAbstractRow,
+    PaperRow,
+    SourceRows,
+    TldrRow,
+)
 
 PAPER_FIELDS = (
     "externalids",
@@ -44,9 +50,16 @@ _PAPER_COLUMNS = (
     "publicationtypes, publicationdate, journal.name AS journal_name, "
     "journal.volume AS journal_volume, journal.pages AS journal_pages"
 )
-_ABSTRACT_COLUMNS = "corpusid, version, source_release, is_deleted, abstract"
+_ABSTRACT_COLUMNS = "corpusid, version, source_release, is_deleted"
+_BEST_COLUMNS = "corpusid, abstract, source, work_id"
 _TLDR_COLUMNS = "corpusid, version, source_release, is_deleted, text"
 _RANGE = "corpusid BETWEEN {low:UInt64} AND {high:UInt64}"
+# A work several papers chose is likely some of theirs only, so its abstract stays out of
+# search until the matching settles who owns it.
+_UNSHARED = (
+    "NOT (source = 'openalex' AND corpusid IN "
+    f"(SELECT corpusid FROM paper_xwalk WHERE {_RANGE} AND shared_work))"
+)
 _AT = "source_release <= {release:Date}"
 _AFTER = "source_release > {from_release:Date}"
 _PROJECTION = ", ".join(
@@ -58,7 +71,9 @@ _PROJECTION = ", ".join(
         "a.version AS abstract_version",
         "a.source_release AS abstract_release",
         "a.is_deleted AS abstract_deleted",
-        "a.abstract AS abstract",
+        "b.abstract AS best_abstract",
+        "b.source AS best_source",
+        "b.work_id AS best_work_id",
         "t.version AS tldr_version",
         "t.source_release AS tldr_release",
         "t.is_deleted AS tldr_deleted",
@@ -82,6 +97,9 @@ LEFT JOIN (
     WHERE {_RANGE}
     {_LATEST}
 ) AS a ON a.corpusid = p.corpusid
+LEFT JOIN (
+    SELECT {_BEST_COLUMNS} FROM paper_abstract_best WHERE {_RANGE} AND {_UNSHARED}
+) AS b ON b.corpusid = p.corpusid
 LEFT JOIN (
     SELECT {_TLDR_COLUMNS} FROM tldrs
     WHERE {_RANGE}
@@ -108,6 +126,10 @@ LEFT JOIN (
     WHERE {_RANGE} AND corpusid IN (SELECT corpusid FROM touched)
     {_LATEST}
 ) AS a ON a.corpusid = touched.corpusid
+LEFT JOIN (
+    SELECT {_BEST_COLUMNS} FROM paper_abstract_best
+    WHERE {_RANGE} AND corpusid IN (SELECT corpusid FROM touched) AND {_UNSHARED}
+) AS b ON b.corpusid = touched.corpusid
 LEFT JOIN (
     SELECT {_TLDR_COLUMNS} FROM tldrs
     WHERE {_RANGE} AND corpusid IN (SELECT corpusid FROM touched)
@@ -173,7 +195,14 @@ def source_rows(row: dict[str, Any]) -> SourceRows:
             version=row["abstract_version"],
             source_release=row["abstract_release"],
             is_deleted=row["abstract_deleted"],
-            abstract=row["abstract"],
+        )
+    best = None
+    if row["best_source"] is not None:
+        best = BestAbstractRow(
+            corpusid=row["corpusid"],
+            abstract=row["best_abstract"],
+            source=row["best_source"],
+            work_id=row["best_work_id"],
         )
     tldr = None
     if row["tldr_version"] is not None:
@@ -184,4 +213,6 @@ def source_rows(row: dict[str, Any]) -> SourceRows:
             is_deleted=row["tldr_deleted"],
             text=row["tldr"],
         )
-    return SourceRows(corpusid=row["corpusid"], paper=paper, abstract=abstract, tldr=tldr)
+    return SourceRows(
+        corpusid=row["corpusid"], paper=paper, abstract=abstract, tldr=tldr, best=best
+    )

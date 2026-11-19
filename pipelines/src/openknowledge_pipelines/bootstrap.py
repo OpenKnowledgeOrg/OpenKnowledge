@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -11,6 +11,7 @@ from importlib.metadata import version
 from typing import TYPE_CHECKING
 
 from openknowledge_adapters import batch, clickhouse, gcs, openalex, opensearch, semantic_scholar
+from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
 from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
@@ -25,6 +26,7 @@ from openknowledge_core.ingestion.coordinator import CORE_ORDER, LARGE_ORDER
 from openknowledge_core.ingestion.errors import IngestionError
 from openknowledge_core.ingestion.families import ArchiveFamily
 from openknowledge_core.ingestion.measurement import LoadObservation
+from openknowledge_core.ingestion.models import held_release
 from openknowledge_core.ingestion.ports import LoadTelemetry, ReadTables
 from openknowledge_core.search import IndexPapers, SearchIndexService
 from openknowledge_core.search.commands import IndexPapersResult
@@ -361,6 +363,20 @@ async def open_read_tables(
         read_tables_max_delta_keys=settings.read_tables_max_delta_keys,
     ) as ch:
         yield ch.read_tables
+
+
+@asynccontextmanager
+async def open_held_releases(
+    settings: LoadSettings,
+) -> AsyncGenerator[Callable[[DatasetName], Awaitable[ReleaseId | None]], None]:
+    """The release each dataset's table holds: applied to its live table, which has rows."""
+    async with clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch:
+
+        async def held(dataset: DatasetName) -> ReleaseId | None:
+            table = await ch.tables.table(dataset)
+            return held_release(table, await ch.applied.latest(table.name))
+
+        yield held
 
 
 async def _index_search_part(settings: SearchSettings, command: IndexPapers) -> IndexPapersResult:
