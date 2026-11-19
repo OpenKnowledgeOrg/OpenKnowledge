@@ -120,15 +120,21 @@ _RELEASE = TypeAdapter(ReleaseId)
 log = logging.getLogger(__name__)
 
 
-def build_budget(ram: int, cores: int) -> ReadTableBudget:
-    """Use half of RAM, rounded down to whole GB.
+def build_budget(limit: int, ratio: float, cores: int) -> ReadTableBudget:
+    """Use half of RAM, but at most 60% of the server memory limit, rounded down to whole GB.
 
-    Budget 4 GB per thread for headroom over the two-thread probe (~2 GiB total), and
-    spill at half the query cap to leave space for merging spilled data.
+    RAM is the limit over its RAM ratio; a zero ratio means the limit was set alone. Budget
+    4 GB per thread for headroom over the two-thread probe (~2 GiB total), and spill at half
+    the query cap to leave space for merging spilled data.
     """
-    memory = ram // (2 * GB) * GB
-    if memory <= 0 or cores <= 0:
-        raise TableRejected("ClickHouse reported invalid RAM or CPU capacity for read tables")
+    if limit <= 0 or ratio < 0 or cores <= 0:
+        raise TableRejected("ClickHouse reported an invalid memory limit or CPU count")
+    cap = limit * 3 // 5
+    if ratio > 0:
+        cap = min(cap, int(limit / ratio) // 2)
+    memory = cap // GB * GB
+    if memory <= 0:
+        raise TableRejected(f"ClickHouse memory limit {limit} is too small for read tables")
     return ReadTableBudget(
         memory_bytes=memory,
         max_threads=max(1, min(cores, memory // (4 * GB))),
@@ -292,11 +298,8 @@ class ClickHouseReadTables:
         )
         if not rows:
             raise TableRejected("ClickHouse did not report server settings for read tables")
-        limit = int(rows[0]["memory_limit"])
-        ratio = float(rows[0]["memory_ratio"])
-        if limit <= 0 or not ratio > 0:
-            raise TableRejected("ClickHouse reported an invalid server memory limit or RAM ratio")
-        return build_budget(int(limit / ratio), int(rows[0]["cores"]))
+        row = rows[0]
+        return build_budget(int(row["memory_limit"]), float(row["memory_ratio"]), int(row["cores"]))
 
     async def build(
         self, producer: Producer, clock: Callable[[], datetime], *, full: bool = False

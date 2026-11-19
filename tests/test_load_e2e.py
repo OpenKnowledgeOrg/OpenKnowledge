@@ -539,6 +539,7 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
         assert budget["memory_bytes"] >= 10**9 and budget["memory_bytes"] % 10**9 == 0
         assert budget["spill_bytes"] == budget["memory_bytes"] // 2
         assert 1 <= budget["max_threads"] <= max(1, budget["memory_bytes"] // (4 * 10**9))
+        assert budget["max_threads"] <= (os.cpu_count() or 1)
         assert built["paths"] == {"papers": "full", "citations": "full", "openalex": "full"}
         assert built["source_releases"] == {
             "papers": "2026-10-19",

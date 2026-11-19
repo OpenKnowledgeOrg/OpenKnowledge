@@ -41,15 +41,18 @@ FULL, INCREMENTAL, CURRENT = ReadTablesPath.FULL, ReadTablesPath.INCREMENTAL, Re
 
 
 @pytest.mark.parametrize(
-    ("ram", "cores", "memory", "threads"),
+    ("limit", "ratio", "cores", "memory", "threads"),
     [
-        (16 * 10**9, 2, 8 * 10**9, 2),
-        (16_400_000_000, 2, 8 * 10**9, 2),
-        (256 * 10**9, 64, 128 * 10**9, 32),
+        (14_760_000_000, 0.9, 2, 8 * 10**9, 2),
+        (230_400_000_000, 0.9, 64, 128 * 10**9, 32),
+        (230_400_000_000, 0.9, 8, 128 * 10**9, 8),
+        # An explicit cap below ratio x RAM: stay under the server's own limit.
+        (4 * 10**9, 0.4, 2, 2 * 10**9, 1),
+        (10 * 10**9, 0, 4, 6 * 10**9, 1),
     ],
 )
-def test_build_budget(ram: int, cores: int, memory: int, threads: int) -> None:
-    assert build_budget(ram, cores) == ReadTableBudget(
+def test_build_budget(limit: int, ratio: float, cores: int, memory: int, threads: int) -> None:
+    assert build_budget(limit, ratio, cores) == ReadTableBudget(
         memory_bytes=memory, max_threads=threads, spill_bytes=memory // 2
     )
 
@@ -184,7 +187,7 @@ class FakeClickHouse:
             assert "getServerSetting('max_server_memory_usage_to_ram_ratio')" in query
             assert "FROM" not in query
             assert "SETTINGS max_threads = 'auto'" in query
-            rows = [{"memory_limit": "230400000000", "memory_ratio": 0.9, "cores": "64"}]
+            rows = [{"memory_limit": "230400000000", "memory_ratio": 0.9, "cores": "16"}]
         elif query.startswith("SELECT 1 FROM applied"):
             mine = [
                 found
@@ -263,7 +266,7 @@ class FakeClickHouse:
             threads = (
                 1
                 if source is not None and "SELECT DISTINCT" in query.partition(" FROM ")[0]
-                else 32
+                else 16
             )
             assert f"max_threads = {threads}," in query
             assert "max_memory_usage = 128000000000," in query
@@ -396,7 +399,7 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         assert result.source_releases == {"papers": NEXT, "citations": NEXT, "abstracts": NEXT}
         assert result.paths == {"papers": FULL, "citations": FULL, "openalex": CURRENT}
         assert result.budget == ReadTableBudget(
-            memory_bytes=128 * 10**9, max_threads=32, spill_bytes=64 * 10**9
+            memory_bytes=128 * 10**9, max_threads=16, spill_bytes=64 * 10**9
         )
         assert await edges.is_current(result.source_releases)
     assert [name for name, state in stages if state == "completed"] == [

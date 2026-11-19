@@ -30,7 +30,7 @@ from openknowledge_adapters.clickhouse.read_tables import (
 from openknowledge_core.ingestion.read_tables import GROUPS
 from tests.clickhouse_local import clickhouse_local, needs_clickhouse, up
 
-BUDGET = build_budget(16 * 10**9, 2)
+BUDGET = build_budget(14_760_000_000, 0.9, 2)
 
 
 @needs_clickhouse
