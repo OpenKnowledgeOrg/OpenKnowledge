@@ -2,8 +2,9 @@
 -- +goose Up
 -- OpenAlex leaves is_retracted empty for some works (1.69M of 464.8M in 2026-10-14).
 -- A failed rollback leaves its conversion pending; removing its guard below would let it
--- turn NULL into false. Refuse until an operator has killed that mutation.
-SELECT throwIf(count() > 0, 'openalex_works has an unfinished mutation; kill it first')
+-- turn NULL into false. Refuse while any mutation is unfinished: let healthy work finish,
+-- and kill only a failed rollback conversion.
+SELECT throwIf(count() > 0, 'openalex_works has an unfinished mutation; see system.mutations')
 FROM system.mutations
 WHERE database = currentDatabase() AND table = 'openalex_works' AND NOT is_done FORMAT Null;
 ALTER TABLE openalex_works MODIFY COLUMN is_retracted Nullable(Bool) DEFAULT NULL;
