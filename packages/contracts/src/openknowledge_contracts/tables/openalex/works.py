@@ -24,7 +24,7 @@ WORKS = DatasetContract(
             optional("type", _LABEL),
             optional("language", _LABEL),
             required("is_xpac", pa.bool_()),
-            required("is_retracted", pa.bool_()),
+            optional("is_retracted", pa.bool_()),
             required("is_paratext", pa.bool_()),
             required("has_abstract", pa.bool_()),
             optional("oa_status", _LABEL),

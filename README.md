@@ -189,6 +189,8 @@ Migration 00025 adds `paper_abstract_best` to the group: one abstract per live p
 abstract when there is one (even an empty one), otherwise the non-empty abstract of the chosen
 OpenAlex work, with `source` saying which. It takes the papers and abstracts diffs and holds the
 earlier of their two releases; until abstracts holds a release, the group is skipped.
+Migration 00026 makes `openalex_works.is_retracted` nullable: OpenAlex leaves it empty for some works,
+and the load keeps that as NULL instead of refusing the file.
 
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.

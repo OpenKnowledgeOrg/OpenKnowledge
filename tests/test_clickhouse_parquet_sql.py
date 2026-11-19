@@ -94,6 +94,7 @@ def work(
     best_oa: dict[str, Any] | None = FULL_LOCATION,
     has_content: tuple[bool, bool] | None = (False, False),
     abstract: str | None = None,
+    is_retracted: bool | None = False,
 ) -> dict[str, Any]:
     return {
         "id": id,
@@ -107,7 +108,7 @@ def work(
         "best_oa_location": best_oa,
         "open_access": {"is_oa": best_oa is not None, "oa_status": "gold"},
         "is_paratext": False,
-        "is_retracted": False,
+        "is_retracted": is_retracted,
         "is_xpac": False,
         "abstract_inverted_index": abstract,
         "has_content": None
@@ -170,6 +171,7 @@ def test_a_works_file_lands_with_normalised_ids(tmp_path: Path) -> None:
                 updated_date="2026-10-12T03:04:05.123456",
                 has_content=(True, False),
                 abstract='{"a":[0]}',
+                is_retracted=True,
             ),
             work(
                 "https://openalex.org/W5",
@@ -178,6 +180,7 @@ def test_a_works_file_lands_with_normalised_ids(tmp_path: Path) -> None:
                 best_oa=None,
                 has_content=None,
                 abstract=None,
+                is_retracted=None,
             ),
             work("https://openalex.org/W6", doi="doi:10.5555/X"),
             work("https://openalex.org/W7", doi="https://dx.doi.org/10.1/Y"),
@@ -197,6 +200,7 @@ def test_a_works_file_lands_with_normalised_ids(tmp_path: Path) -> None:
             "has_pdf": True,
             "has_grobid_xml": False,
             "has_abstract": True,
+            "is_retracted": True,
             "source_release": RELEASE,
             "removed": False,
         }.items()
@@ -212,6 +216,7 @@ def test_a_works_file_lands_with_normalised_ids(tmp_path: Path) -> None:
             "is_oa": False,
             "has_pdf": None,
             "has_abstract": False,
+            "is_retracted": None,
         }.items()
     )
     assert [rows[k]["doi_norm"] for k in ("6", "7", "8")] == ["10.5555/x", "10.1/y", None]
