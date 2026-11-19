@@ -54,6 +54,12 @@ _ABSTRACT_COLUMNS = "corpusid, version, source_release, is_deleted"
 _BEST_COLUMNS = "corpusid, abstract, source, work_id"
 _TLDR_COLUMNS = "corpusid, version, source_release, is_deleted, text"
 _RANGE = "corpusid BETWEEN {low:UInt64} AND {high:UInt64}"
+# A work several papers chose is likely some of theirs only, so its abstract stays out of
+# search until the matching settles who owns it.
+_UNSHARED = (
+    "NOT (source = 'openalex' AND corpusid IN "
+    f"(SELECT corpusid FROM paper_xwalk WHERE {_RANGE} AND shared_work))"
+)
 _AT = "source_release <= {release:Date}"
 _AFTER = "source_release > {from_release:Date}"
 _PROJECTION = ", ".join(
@@ -92,7 +98,7 @@ LEFT JOIN (
     {_LATEST}
 ) AS a ON a.corpusid = p.corpusid
 LEFT JOIN (
-    SELECT {_BEST_COLUMNS} FROM paper_abstract_best WHERE {_RANGE}
+    SELECT {_BEST_COLUMNS} FROM paper_abstract_best WHERE {_RANGE} AND {_UNSHARED}
 ) AS b ON b.corpusid = p.corpusid
 LEFT JOIN (
     SELECT {_TLDR_COLUMNS} FROM tldrs
@@ -122,7 +128,7 @@ LEFT JOIN (
 ) AS a ON a.corpusid = touched.corpusid
 LEFT JOIN (
     SELECT {_BEST_COLUMNS} FROM paper_abstract_best
-    WHERE {_RANGE} AND corpusid IN (SELECT corpusid FROM touched)
+    WHERE {_RANGE} AND corpusid IN (SELECT corpusid FROM touched) AND {_UNSHARED}
 ) AS b ON b.corpusid = touched.corpusid
 LEFT JOIN (
     SELECT {_TLDR_COLUMNS} FROM tldrs

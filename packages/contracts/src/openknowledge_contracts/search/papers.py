@@ -2,7 +2,8 @@
 
 The document is built from the current rows of the ``papers``, ``paper_abstract_best`` and
 ``tldrs`` tables. The abstract is Semantic Scholar's when it has a live one, else that of the
-paper's chosen OpenAlex work, and ``abstract_source`` says which.
+paper's chosen OpenAlex work unless other papers chose it too, and ``abstract_source`` says
+which.
 Its counts are ``long`` because the tables hold them as ``UInt32``, which an ``integer`` field, a
 signed 32-bit number, cannot take at its top. ``externalids`` lists the identifier kinds the
 index knows; Semantic Scholar adds kinds without notice, and those stay out of the index. The

@@ -249,7 +249,8 @@ A current run repairs the alias if needed and does no document writes.
 
 Contract v3 takes `abstract` from `paper_abstract_best`: Semantic Scholar's abstract when it has
 a live one, else that of the paper's chosen OpenAlex work, and `abstract_source` (`s2` or
-`openalex`) says which. Each new OpenAlex release builds a new physical index, since the release
+`openalex`) says which. A work that several papers chose (`shared_work`) gives none of them an
+abstract until the matching settles which paper it belongs to. Each new OpenAlex release builds a new physical index, since the release
 is part of the name's fingerprint, and a pass whose OpenAlex release changes before it completes
 is refused. Every document of an index built from OpenAlex release D carries at least version
 `D * 2`, so a document never falls below a version it had. The DevTool must accept contract v3
