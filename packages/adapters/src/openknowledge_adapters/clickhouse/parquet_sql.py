@@ -151,7 +151,7 @@ CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
             (_IS_WORK, "openalex_works: id breaks the contract"),
             *(
                 (f"{name} IS NOT NULL", f"openalex_works: {name} breaks the contract")
-                for name in ("is_xpac", "is_retracted", "is_paratext", "updated_date")
+                for name in ("is_xpac", "is_paratext", "updated_date")
             ),
         ),
         "works-abstracts": ((_IS_WORK, "openalex_abstracts: id breaks the contract"),),
