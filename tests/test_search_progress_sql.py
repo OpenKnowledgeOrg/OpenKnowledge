@@ -59,8 +59,7 @@ async def test_receipts_round_trip_and_replaced_sources_need_new_applied(tmp_pat
             "paper_abstract_best",
             "openalex_works",
         }
-        # The read table's own UUID is not a source: rebuilding it changes no document.
-        assert "paper_abstract_best" not in state.sources
+        assert set(state.sources) == set(state.releases)
         assert state.built_from == {"openalex_works": "2026-10-14"}
         decision = plan_index(state, [], base_parts=2, diff_parts=2)
         assert decision.plan is not None

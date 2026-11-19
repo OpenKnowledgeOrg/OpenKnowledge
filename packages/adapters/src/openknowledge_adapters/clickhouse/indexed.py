@@ -20,8 +20,6 @@ class ClickHouseIndexed:
             "INNER JOIN system.tables t ON t.name = a.target AND t.uuid = a.target_uuid "
             "WHERE t.database = currentDatabase()"
         )
-        # The live read table's release counts, not its UUID: rebuilding it from the same
-        # releases changes no document, so it must not force a new index.
         built = await self._client.rows(
             "SELECT a.release AS release FROM applied a INNER JOIN system.tables t "
             "ON t.uuid = a.target_uuid AND t.name = 'paper_abstract_best' "
@@ -31,11 +29,9 @@ class ClickHouseIndexed:
         return SearchState.model_validate(
             {
                 "releases": {r["target"]: r["release"] for r in rows},
-                "sources": {
-                    r["target"]: r["target_uuid"]
-                    for r in rows
-                    if r["target"] != "paper_abstract_best"
-                },
+                # A full rebuild of paper_abstract_best swaps in a new UUID, so a base pass that
+                # read a stale table is refused, and changed match rules reach search.
+                "sources": {r["target"]: r["target_uuid"] for r in rows},
                 "built_from": {"openalex_works": built[0]["release"]} if built else {},
             }
         )
