@@ -23,11 +23,14 @@ from openknowledge_adapters.clickhouse.read_tables import (
     PAPERS,
     SOURCES,
     apply_sql,
+    build_budget,
     delta_sql,
     in_only_sql,
 )
 from openknowledge_core.ingestion.read_tables import GROUPS
 from tests.clickhouse_local import clickhouse_local, needs_clickhouse, up
+
+BUDGET = build_budget(16 * 10**9, 2)
 
 
 @needs_clickhouse
@@ -96,10 +99,10 @@ def _compare(tables: tuple[str, ...]) -> str:
 @needs_clickhouse
 def test_incremental_update_equals_full_rebuild(tmp_path: Path) -> None:
     run = [
-        *delta_sql("citations", "2026-10-01", "2026-10-03", 100),
-        *apply_sql("citations"),
-        *delta_sql("papers", "2026-10-01", "2026-10-03", 100),
-        *apply_sql("papers"),
+        *delta_sql("citations", "2026-10-01", "2026-10-03", 100, BUDGET),
+        *apply_sql("citations", BUDGET),
+        *delta_sql("papers", "2026-10-01", "2026-10-03", 100, BUDGET),
+        *apply_sql("papers", BUDGET),
     ]
     # A run that stopped before its last insert, then two complete reruns.
     statements = ";\n".join([*run[:-1], *run, *run])
@@ -144,7 +147,7 @@ def test_incremental_update_equals_full_rebuild(tmp_path: Path) -> None:
 
 @needs_clickhouse
 def test_in_only_rebuild_fills_ids_from_out(tmp_path: Path) -> None:
-    rebuild = ";\n".join(in_only_sql())
+    rebuild = ";\n".join(in_only_sql(BUDGET))
     sql = f"""
         {up()}
         INSERT INTO citation_edges_out (citing, cited, isinfluential, intents, citationid)
@@ -164,7 +167,8 @@ def test_in_only_rebuild_fills_ids_from_out(tmp_path: Path) -> None:
 @pytest.mark.parametrize("source", ["citations", "papers", "openalex"])
 def test_delta_takes_keys_after_start_up_to_end(source: str, tmp_path: Path) -> None:
     complete, capped = (
-        ";\n".join(delta_sql(source, "2026-10-01", "2026-10-03", max_keys)) for max_keys in (3, 1)
+        ";\n".join(delta_sql(source, "2026-10-01", "2026-10-03", max_keys, BUDGET))
+        for max_keys in (3, 1)
     )
     # The openalex keys come from papers and abstracts together.
     first, second = ("papers", "abstracts") if source == "openalex" else (source, source)
@@ -254,7 +258,10 @@ def test_xwalk_full_build_ranks_every_candidate(tmp_path: Path) -> None:
 
 @needs_clickhouse
 def test_xwalk_incremental_equals_full_rebuild(tmp_path: Path) -> None:
-    run = [*delta_sql("openalex", "2026-10-01", "2026-10-03", 100), *apply_sql("openalex")]
+    run = [
+        *delta_sql("openalex", "2026-10-01", "2026-10-03", 100, BUDGET),
+        *apply_sql("openalex", BUDGET),
+    ]
     # A run that stopped before its last insert, then two complete reruns on the kept delta.
     statements = ";\n".join([*run[:-1], *run, *run])
     xwalk = GROUPS["openalex"]
@@ -323,7 +330,10 @@ def test_best_abstract_prefers_live_s2_then_the_chosen_work(tmp_path: Path) -> N
 
 @needs_clickhouse
 def test_best_abstract_incremental_equals_full_rebuild(tmp_path: Path) -> None:
-    run = [*delta_sql("openalex", "2026-10-01", "2026-10-02", 100), *apply_sql("openalex")]
+    run = [
+        *delta_sql("openalex", "2026-10-01", "2026-10-02", 100, BUDGET),
+        *apply_sql("openalex", BUDGET),
+    ]
     statements = ";\n".join([*run[:-1], *run, *run])
     group = GROUPS["openalex"]
     sql = f"""
@@ -371,7 +381,10 @@ def test_apply_keeps_the_best_abstract_of_papers_that_only_shared_a_work(tmp_pat
     group = GROUPS["openalex"]
     # Stop before the last insert, as a search pass reading in between would see it.
     statements = ";\n".join(
-        [*delta_sql("openalex", "2026-10-01", "2026-10-02", 100), *apply_sql("openalex")][:-1]
+        [
+            *delta_sql("openalex", "2026-10-01", "2026-10-02", 100, BUDGET),
+            *apply_sql("openalex", BUDGET),
+        ][:-1]
     )
     sql = f"""
         {up()}

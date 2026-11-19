@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, NonNegativeFloat, NonNegativeInt
+from pydantic import BaseModel, ConfigDict, NonNegativeFloat, NonNegativeInt, PositiveInt
 
 from openknowledge_contracts.datasets import ReleaseId
 
@@ -105,6 +105,14 @@ class ReadTableResult(BaseModel):
     seconds: NonNegativeFloat
 
 
+class ReadTableBudget(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    memory_bytes: PositiveInt
+    max_threads: PositiveInt
+    spill_bytes: PositiveInt
+
+
 class BuildReadTablesResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -112,3 +120,4 @@ class BuildReadTablesResult(BaseModel):
     tables: dict[str, ReadTableResult]
     paths: dict[str, ReadTablesPath] = {}
     touched: dict[str, NonNegativeInt] = {}
+    budget: ReadTableBudget | None = None
