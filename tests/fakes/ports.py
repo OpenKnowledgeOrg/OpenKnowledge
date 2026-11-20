@@ -358,6 +358,7 @@ class FakeTables:
         self.archive = archive or {}
         self.uuid = UUID(int=1)
         self.updates: UpdateMode = "diffs"
+        self.load_sql = "0" * 64
         self.rows: dict[str, int] = {}
         self.records: dict[tuple[str, str], LoadRecord] = {}
         self.loads: list[str] = []
@@ -379,7 +380,7 @@ class FakeTables:
             archive=self.archive.get(dataset, dataset),
             uuid=self.uuid,
             has_rows=bool(self.rows),
-            load_sql_sha256="0" * 64,
+            load_sql_sha256=self.load_sql,
             delete_sql_sha256="1" * 64,
             updates=self.updates,
         )

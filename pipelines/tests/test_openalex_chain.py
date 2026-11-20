@@ -12,7 +12,12 @@ from openknowledge_core.ingestion import (
 )
 from openknowledge_core.ingestion.errors import IngestionError, TableRejected
 from openknowledge_core.ingestion.read_tables import BuildReadTablesResult, ReadTablesPath
-from openknowledge_pipelines.flows.openalex_load import CORE, check_release, load_release
+from openknowledge_pipelines.flows.openalex_load import (
+    CORE,
+    ReleaseState,
+    check_release,
+    load_release,
+)
 
 RELEASE = "2027-01-13"
 COMMAND = OpenAlexLoad(release=RELEASE, bucket="raw")
@@ -57,23 +62,27 @@ def builder(
     return build
 
 
-async def test_a_new_release_builds_after_its_core_tables_and_a_loaded_one_starts_nothing() -> None:
+async def test_a_release_builds_after_its_core_tables_until_a_build_succeeds() -> None:
     events: list[str] = []
     held: set[str] = set()
+    built: list[bool] = [False]
+    failure: list[str | None] = ["synthetic refusal"]
 
     async def latest() -> str:
         return RELEASE
 
-    async def lagging(release: str) -> tuple[str, ...]:
-        return tuple(name for name in CONTRACTS if name not in held)
+    async def state(release: str) -> ReleaseState:
+        return ReleaseState(tuple(name for name in CONTRACTS if name not in held), built[0])
 
-    async def take(release: str, datasets: tuple[str, ...]) -> OpenAlexLoadResult:
-        command = OpenAlexLoad(release=release, bucket="raw", datasets=datasets)
-        result = await load_release(loader(events), command, builder(events))
-        held.update(datasets)
+    async def take(release: str) -> OpenAlexLoadResult:
+        command = OpenAlexLoad(release=release, bucket="raw")
+        result = await load_release(loader(events), command, builder(events, failure[0]), state)
+        held.update(CONTRACTS)
+        built[0] = built[0] or result.read_tables is not None
         return result
 
-    first = await check_release(latest, lagging, take)
+    # A failed build leaves the core tables loaded and the others loading after it.
+    first = await check_release(latest, state, take)
     build = events.index("build")
     assert events[:build] == list(CORE)
     assert events[build + 1 :] == [name for name in CONTRACTS if name not in CORE]
@@ -85,15 +94,17 @@ async def test_a_new_release_builds_after_its_core_tables_and_a_loaded_one_start
         "works-references",
         "works-classifications",
     ]
-    assert first is not None and first.read_tables is not None
+    assert first is not None and first.read_tables_failure == "synthetic refusal"
     assert first.works is not None and "awards" in first.additional
-    # A loaded release starts nothing.
+    # The next check builds from the loaded release without loading anything.
     events.clear()
-    assert await check_release(latest, lagging, take) is None and events == []
-    # A failed build leaves the load's result standing, with the reason.
-    rebuilt = await load_release(loader(events), COMMAND, builder(events, "synthetic refusal"))
-    assert rebuilt.read_tables is None and rebuilt.read_tables_failure == "synthetic refusal"
-    assert rebuilt.works is not None and rebuilt.works.release_id == RELEASE
+    failure[0] = None
+    rebuilt = await check_release(latest, state, take)
+    assert events == ["build"] and rebuilt is not None and rebuilt.read_tables is not None
+    # A loaded and built release starts nothing, and a run queued behind it does nothing.
+    events.clear()
+    assert await check_release(latest, state, take) is None
+    assert await take(RELEASE) == OpenAlexLoadResult() and events == []
 
 
 async def test_a_failed_new_table_neither_blocks_the_build_nor_the_tables_after_it() -> None:

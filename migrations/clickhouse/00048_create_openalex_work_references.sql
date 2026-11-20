@@ -3,8 +3,8 @@
 CREATE TABLE IF NOT EXISTS openalex_work_references
 (
     work_id UInt64,
-    referenced_works Array(UInt64) CODEC(ZSTD(1)),
-    related_works Array(UInt64) CODEC(ZSTD(1)),
+    referenced_works Array(Nullable(UInt64)) CODEC(ZSTD(1)),
+    related_works Array(Nullable(UInt64)) CODEC(ZSTD(1)),
     referenced_works_count Nullable(Int32),
     source_release Date,
     source_object LowCardinality(String),

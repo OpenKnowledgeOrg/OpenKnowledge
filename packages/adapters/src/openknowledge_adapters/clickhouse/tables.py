@@ -92,6 +92,24 @@ class ClickHouseTables:
         )
         return LoadRecord.model_validate(rows[0]) if rows else None
 
+    async def stale(self, table: TableState, release: ReleaseId) -> bool:
+        """Whether an object of ``release`` went into ``table`` under SQL it no longer loads with.
+
+        A load of the release loads that object again.
+        """
+        rows = await self._client.rows(
+            "SELECT 1 FROM loads FINAL WHERE target = {target:String} "
+            "AND target_uuid = {uuid:UUID} AND source_release = {release:Date} "
+            "AND load_sql_sha256 != if(operation = 'delete', {delete:String}, {upsert:String}) "
+            "LIMIT 1",
+            target=table.name,
+            uuid=str(table.uuid),
+            release=release,
+            delete=table.delete_sql_sha256,
+            upsert=table.load_sql_sha256,
+        )
+        return bool(rows)
+
     async def load(self, request: LoadObject) -> int:
         contract = _contract(request.dataset)
         path = self._readable(request.object_ref.path)

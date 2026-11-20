@@ -19,8 +19,8 @@ def openalex_id(name: str, prefix: str, *, nullable: bool = True) -> ArrowField:
 
 
 def openalex_ids(name: str, prefix: str) -> ArrowField:
-    """A list of OpenAlex URLs of one entity, stored as numbers; a null item is refused."""
-    return required(name, pa.list_(openalex_id("item", prefix, nullable=False)))
+    """A list of OpenAlex URLs of one entity, stored as numbers; a null item stays null."""
+    return required(name, pa.list_(openalex_id("item", prefix)))
 
 
 def id_prefix(field: ArrowField) -> str | None:

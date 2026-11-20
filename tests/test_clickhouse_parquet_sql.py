@@ -499,7 +499,7 @@ def test_nested_work_projections_round_trip(tmp_path: Path) -> None:
             "corresponding_author_ids": ["https://openalex.org/A4"],
             "locations": [FULL_LOCATION],
             "primary_location": FULL_LOCATION,
-            "referenced_works": ["https://openalex.org/W12345678901"],
+            "referenced_works": ["https://openalex.org/W12345678901", None],
             "related_works": ["https://openalex.org/W2"],
             "topics": [{"id": "https://openalex.org/T3", "subfield": {"id": "subfields/1702"}}],
             "concepts": [{"id": "https://openalex.org/C41008148"}],
@@ -527,7 +527,8 @@ def test_nested_work_projections_round_trip(tmp_path: Path) -> None:
     assert no_location["has_primary_location"] is False
     assert no_location["primary_location"]["pdf_url"] is None
     assert no_location["locations"] == []
-    assert refs["referenced_works"] == [12345678901] and refs["related_works"] == [2]
+    # A null ID in a list keeps its place.
+    assert refs["referenced_works"] == [12345678901, None] and refs["related_works"] == [2]
     assert no_refs["referenced_works"] == []
     assert topics["topics"][0]["id"] == 3
     assert topics["topics"][0]["subfield"]["id"] == "subfields/1702"
@@ -548,9 +549,9 @@ def test_nested_work_projections_round_trip(tmp_path: Path) -> None:
         {"identical_rows": 1, "conflicting_keys": 1, "examples": ["(2)"]}
     ]
 
-    # An ID of another entity, or a null where none may be, fails the load instead of parsing.
+    # An ID of another entity fails the load instead of parsing.
     for dataset, column, bad in (
-        ("works-references", "related_works", [None, "https://openalex.org/S2"]),
+        ("works-references", "related_works", ["https://openalex.org/S2"]),
         ("works-authorships", "authorships", [{"author": {"id": "https://openalex.org/I4"}}]),
         ("works-locations", "locations", [{"source": {"id": "https://openalex.org/S1x"}}]),
     ):

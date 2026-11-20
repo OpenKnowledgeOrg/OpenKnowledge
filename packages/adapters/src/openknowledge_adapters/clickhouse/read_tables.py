@@ -275,6 +275,10 @@ class ClickHouseReadTables:
                 return False
         return True
 
+    async def built_from(self, group: str, release: ReleaseId) -> bool:
+        """Whether ``group``'s live tables were built from ``release`` of its quarterly table."""
+        return await self._quarterly_current(group, await self._live(), release)
+
     async def reclaim(self) -> None:
         # A cancelled run's statement keeps running on the server. Replacing its query ID stops
         # it, unlike KILL QUERY, without a grant.

@@ -295,6 +295,8 @@ _WIDE_INSERT_SETTINGS = (
 
 
 def _wide(contract: DatasetContract) -> bool:
+    if contract.name == "works":
+        return True
     return contract in _FULL_RECORDS and contract.archived in {"works", "authors", "awards"}
 
 

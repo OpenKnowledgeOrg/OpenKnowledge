@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from typing import NamedTuple
 
 from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.tables.openalex import CONTRACTS
@@ -22,16 +23,34 @@ CORE: tuple[DatasetName, ...] = ("sources", "works", "works-abstracts")
 """The tables the read tables are built from. The other tables load after the build."""
 
 
+class ReleaseState(NamedTuple):
+    """Where OpenAlex's tables stand against one release."""
+
+    behind: tuple[DatasetName, ...]
+    """The tables that do not hold the release, or hold it from SQL they no longer load with."""
+    built: bool
+    """Whether the read tables were built from the release."""
+
+    @property
+    def current(self) -> bool:
+        return not self.behind and self.built
+
+
 async def load_release(
     load: Callable[[LoadDataset], Awaitable[LoadDatasetResult]],
     command: OpenAlexLoad,
     build: Callable[[], Awaitable[BuildReadTablesResult]] | None = None,
+    state: Callable[[ReleaseId], Awaitable[ReleaseState]] | None = None,
 ) -> OpenAlexLoadResult:
     """The core tables, then ``build`` if one of them was loaded, then the other tables.
 
     A core table that fails stops the run. Another table that fails leaves the core tables and
     the build standing and the tables after it loading; the run fails at the end, naming each.
     Each table takes the release only once all its objects loaded.
+
+    With ``state``, read once the caller holds the load limit, only the tables behind the
+    release load, and the build also runs when the read tables were not built from it; so a
+    run queued behind another that took the release does nothing.
     """
 
     def dataset(name: str) -> LoadDataset:
@@ -40,11 +59,16 @@ async def load_release(
         )
 
     names = [name for name in CONTRACTS if not command.datasets or name in command.datasets]
+    unbuilt = False
+    if state is not None:
+        found = await state(command.release)
+        names = [name for name in names if name in found.behind]
+        unbuilt = not found.built
     core = {name: await load(dataset(name)) for name in names if name in CORE}
     result = OpenAlexLoadResult(
         sources=core.get("sources"), works=core.get("works"), abstracts=core.get("works-abstracts")
     )
-    if core and build is not None:
+    if (core or unbuilt) and build is not None:
         result = await _build(build, command.release, result)
     additional: dict[DatasetName, LoadDatasetResult] = {}
     failed: dict[DatasetName, str] = {}
@@ -69,7 +93,7 @@ async def _build(
 ) -> OpenAlexLoadResult:
     """Bring the read tables current, as an S2 sync does after its loads.
 
-    A failed build leaves the release applied; the next sync builds the read tables from it.
+    A failed build leaves the release applied; the next release check builds from it.
     """
     try:
         built = await build()
@@ -81,19 +105,24 @@ async def _build(
 
 async def check_release(
     latest: Callable[[], Awaitable[ReleaseId]],
-    lagging: Callable[[ReleaseId], Awaitable[tuple[DatasetName, ...]]],
-    take: Callable[[ReleaseId, tuple[DatasetName, ...]], Awaitable[OpenAlexLoadResult]],
+    state: Callable[[ReleaseId], Awaitable[ReleaseState]],
+    take: Callable[[ReleaseId], Awaitable[OpenAlexLoadResult]],
 ) -> OpenAlexLoadResult | None:
-    """Take OpenAlex's release into the tables that do not hold it yet; then start nothing.
+    """Take OpenAlex's release into the tables behind it, and build from it; then start nothing.
 
-    Only a lagging core table brings a build. Archive and load resume from their receipts, so
-    a release whose archive or load failed is taken up again, and only the missing objects are
-    downloaded or loaded.
+    ``take`` reads the state again under the load limit. Archive and load resume from their
+    receipts, so a release whose archive, load or build failed is taken up again, and only the
+    missing objects are downloaded or loaded.
     """
     release = await latest()
-    behind = await lagging(release)
-    if not behind:
-        log.info("OpenAlex release %s is loaded already", release)
+    found = await state(release)
+    if found.current:
+        log.info("OpenAlex release %s is loaded and built already", release)
         return None
-    log.info("OpenAlex release %s is not loaded into %s yet", release, ", ".join(behind))
-    return await take(release, behind)
+    log.info(
+        "OpenAlex release %s: behind in %s; read tables built: %s",
+        release,
+        ", ".join(found.behind) or "no table",
+        found.built,
+    )
+    return await take(release)

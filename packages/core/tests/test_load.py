@@ -111,13 +111,16 @@ async def test_a_rerun_skips_every_loaded_object(store: FakeStore, tables: FakeT
     assert tables.scanned == []
 
 
-@pytest.mark.parametrize("change", ["recreated", "truncated"])
-async def test_a_recreated_or_emptied_table_loads_again(
+@pytest.mark.parametrize("change", ["recreated", "truncated", "new SQL"])
+async def test_a_recreated_or_emptied_table_or_new_sql_loads_again(
     store: FakeStore, tables: FakeTables, change: str
 ) -> None:
     await load(store, tables)
     if change == "recreated":
         tables.uuid = UUID(int=2)
+    elif change == "new SQL":
+        # Receipts from an older load SQL count for nothing; every object loads again.
+        tables.load_sql = "2" * 64
     else:
         tables.rows.clear()
     assert (await load(store, tables)).loaded == 2
