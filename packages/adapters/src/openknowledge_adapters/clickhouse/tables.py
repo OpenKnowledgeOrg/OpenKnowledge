@@ -121,43 +121,18 @@ class ClickHouseTables:
         )
         return LoadRecord.model_validate(rows[0]) if rows else None
 
-    async def stale(self, table: TableState, release: ReleaseId, *, prefix: str) -> bool:
-        """Whether an object in the configured release archive was loaded under outdated SQL.
-
-        An object whose receipt names another UUID was loaded into a staging copy since, which
-        has not been swapped in.
-        """
+    async def receipts(
+        self, table: TableState, release: ReleaseId, *, prefix: str
+    ) -> dict[str, LoadRecord]:
         archive = ObjectPath.under(self._raw_bucket, prefix.strip("/"), release, table.archive)
         rows = await self._client.rows(
-            "SELECT 1 FROM loads FINAL WHERE target = {target:String} "
-            "AND source_release = {release:Date} "
-            "AND startsWith(source_object, {archive:String}) AND (target_uuid != {uuid:UUID} "
-            "OR load_sql_sha256 != if(operation = 'delete', {delete:String}, {upsert:String})) "
-            "LIMIT 1",
+            f"SELECT {RECORD_COLUMNS} FROM loads FINAL WHERE target = {{target:String}} "
+            "AND source_release = {release:Date} AND startsWith(source_object, {archive:String})",
             target=table.name,
-            uuid=str(table.uuid),
             release=release,
             archive=f"{archive}/",
-            delete=table.delete_sql_sha256,
-            upsert=table.load_sql_sha256,
         )
-        return bool(rows)
-
-    async def current(self, table: TableState, release: ReleaseId, *, prefix: str) -> int:
-        archive = ObjectPath.under(self._raw_bucket, prefix.strip("/"), release, table.archive)
-        rows = await self._client.rows(
-            "SELECT count() AS objects FROM loads FINAL WHERE target = {target:String} "
-            "AND source_release = {release:Date} "
-            "AND startsWith(source_object, {archive:String}) AND target_uuid = {uuid:UUID} "
-            "AND load_sql_sha256 = if(operation = 'delete', {delete:String}, {upsert:String})",
-            target=table.name,
-            uuid=str(table.uuid),
-            release=release,
-            archive=f"{archive}/",
-            delete=table.delete_sql_sha256,
-            upsert=table.load_sql_sha256,
-        )
-        return int(rows[0]["objects"])
+        return {row["source_object"]: LoadRecord.model_validate(row) for row in rows}
 
     async def stage(self, table: TableState, release: ReleaseId) -> TableState:
         """Reuse a staging copy only with the live schema and no rows of another release."""

@@ -275,8 +275,11 @@ async def test_a_staged_table_takes_each_release_through_a_copy_it_swaps_in(
     store: FakeStore, staged: FakeTables
 ) -> None:
     applied = FakeApplied()
+    service = loader(store, staged, applied)
+    assert not await service.holds(LOAD)
     first = await load(store, staged, applied)
     assert (first.loaded, staged.copies, staged.swaps, staged.uuid) == (2, 1, 1, UUID(int=101))
+    assert await service.holds(LOAD)
     # Holding the release under current receipts, the table is only checked again.
     again = await load(store, staged, applied)
     assert (again.loaded, again.already_loaded, staged.copies, staged.swaps) == (0, 2, 1, 2)
@@ -284,12 +287,37 @@ async def test_a_staged_table_takes_each_release_through_a_copy_it_swaps_in(
     assert (result.loaded, result.live_rows, result.removed, staged.marked) == (2, 51, 0, [])
     assert (staged.copies, staged.uuid) == (2, UUID(int=102))
     assert held(applied) == [(UUID(int=101), RELEASE)] * 2 + [(UUID(int=102), NEXT)]
-    # An object without a receipt sends the rerun through a fresh copy, not into the live table.
-    del staged.records[
-        next(key for key, found in staged.records.items() if found.source_release == NEXT)
-    ]
-    rerun = await load(store, staged, applied, LOAD_NEXT)
+    # A receipt of another generation sends the rerun into a fresh copy, though every object
+    # still has a receipt, and leaves the live table as it is until the swap.
+    key = next(key for key, found in staged.records.items() if found.source_release == NEXT)
+    staged.records[key] = staged.records[key].model_copy(update={"generation": 99})
+    assert not await service.holds(LOAD_NEXT)
+    live = dict(staged.rows)
+    prepared = await service.prepare(LOAD_NEXT)
+    outcomes = [await service.load_object(prepared, entry) for entry in prepared.manifest.entries]
+    assert (prepared.table.into, staged.rows) == (f"{prepared.table.name}_staging", live)
+    rerun = await service.finish(prepared, outcomes)
     assert (rerun.loaded, staged.copies, staged.uuid) == (2, 3, UUID(int=103))
+    assert await service.holds(LOAD_NEXT)
+    # An object without a receipt leaves the table behind the release.
+    del staged.records[key]
+    assert not await service.holds(LOAD_NEXT)
+
+
+async def test_only_a_tidy_check_of_a_held_release_drops_the_copy_left_over(
+    store: FakeStore, staged: FakeTables
+) -> None:
+    applied = FakeApplied()
+    service = loader(store, staged, applied)
+    await load(store, staged, applied)
+    # A crash between swap and drop left the release before in the copy.
+    staged.staging_uuid, staged.staging_release = UUID(int=900), "2026-09-29"
+    assert await service.holds(LOAD) and staged.staging_release == "2026-09-29"
+    assert not await service.holds(LOAD_NEXT, tidy=True) and staged.staging_release is not None
+    assert await service.holds(LOAD, tidy=True) and staged.staging_release is None
+    # A copy of a newer release is a load to resume.
+    staged.staging_uuid, staged.staging_release = UUID(int=901), NEXT
+    assert await service.holds(LOAD, tidy=True) and staged.staging_release == NEXT
 
 
 async def test_a_failed_check_or_a_crash_before_the_swap_leaves_the_live_table(

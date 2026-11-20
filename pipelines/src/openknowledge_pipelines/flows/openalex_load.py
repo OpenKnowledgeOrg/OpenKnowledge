@@ -107,17 +107,19 @@ async def check_release(
     latest: Callable[[], Awaitable[ReleaseId]],
     state: Callable[[ReleaseId], Awaitable[ReleaseState]],
     take: Callable[[ReleaseId], Awaitable[OpenAlexLoadResult]],
+    tidy: Callable[[ReleaseId], Awaitable[None]],
 ) -> OpenAlexLoadResult | None:
-    """Take OpenAlex's release into the tables behind it, and build from it; then start nothing.
+    """Take OpenAlex's release into the tables behind it, and build from it; then only tidy.
 
     ``take`` reads the state again under the load limit. Archive and load resume from their
     receipts, so a release whose archive, load or build failed is taken up again, and only the
-    missing objects are downloaded or loaded.
+    missing objects are downloaded or loaded. ``tidy`` drops what a current release left over.
     """
     release = await latest()
     found = await state(release)
     if found.current:
         log.info("OpenAlex release %s is loaded and built already", release)
+        await tidy(release)
         return None
     log.info(
         "OpenAlex release %s: behind in %s; read tables built: %s",

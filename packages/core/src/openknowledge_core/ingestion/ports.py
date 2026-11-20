@@ -86,15 +86,10 @@ class ArtifactStore(Protocol):
 class TableLoader(Protocol):
     async def table(self, dataset: DatasetName) -> TableState: ...
 
-    async def stale(self, table: TableState, release: ReleaseId, *, prefix: str) -> bool:
-        """Whether an object of ``release`` under ``prefix`` has a receipt not current for it.
-
-        A receipt is current when it names the table's UUID and the SQL it loads with now.
-        """
-        ...
-
-    async def current(self, table: TableState, release: ReleaseId, *, prefix: str) -> int:
-        """How many objects of ``release`` under ``prefix`` have a receipt current for it."""
+    async def receipts(
+        self, table: TableState, release: ReleaseId, *, prefix: str
+    ) -> Mapping[str, LoadRecord]:
+        """The receipt of each object of ``release`` archived under ``prefix``, by object."""
         ...
 
     async def stage(self, table: TableState, release: ReleaseId) -> TableState:

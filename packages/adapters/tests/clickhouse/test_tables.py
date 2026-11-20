@@ -188,7 +188,9 @@ def local_clickhouse(workdir: Path) -> httpx.MockTransport:
             for key, value in request.url.params.items()
             if key.startswith("param_")
         }
-        result = run(request.content.decode(), workdir, **params)
+        # The client asks for ISO timestamps, which a receipt reads back with their zone.
+        iso = "SET date_time_output_format = 'iso';\n"
+        result = run(iso + request.content.decode(), workdir, **params)
         assert result.returncode == 0, result.stderr
         return httpx.Response(200, text=result.stdout)
 
@@ -196,7 +198,7 @@ def local_clickhouse(workdir: Path) -> httpx.MockTransport:
 
 
 @needs_clickhouse
-async def test_stale_checks_receipts_in_the_configured_archive_for_sql_and_uuid(
+async def test_receipts_are_read_from_the_configured_archive_only(
     tmp_path: Path,
 ) -> None:
     release = "2026-10-14"
@@ -213,8 +215,9 @@ async def test_stale_checks_receipts_in_the_configured_archive_for_sql_and_uuid(
         updates="snapshot",
     )
     receipt = (
-        "INSERT INTO loads (target, target_uuid, source_release, source_object, load_sql_sha256) "
-        "VALUES ('openalex_works', {uuid:UUID}, {release:Date}, {path:String}, {hash:String});"
+        "INSERT INTO loads (target, target_uuid, source_release, source_object, generation, "
+        "sha256, load_sql_sha256) VALUES ('openalex_works', {uuid:UUID}, {release:Date}, "
+        "{path:String}, 1, repeat('a', 64), {hash:String});"
     )
     migration = section(MIGRATIONS / "00008_create_loads.sql", "Up")
     result = run(
@@ -227,30 +230,24 @@ async def test_stale_checks_receipts_in_the_configured_archive_for_sql_and_uuid(
     )
     assert result.returncode == 0, result.stderr
     async with clickhouse.connect(CONFIG, transport=local_clickhouse(tmp_path)) as ch:
-        assert await ch.tables.stale(table, release, prefix="old/openalex")
-        assert not await ch.tables.stale(table, release, prefix="openalex")
-        # Loaded into a staging copy under current SQL, but not swapped in.
+        old = await ch.tables.receipts(table, release, prefix="old/openalex")
+        assert {path: found.load_sql_sha256 for path, found in old.items()} == {
+            "gs://raw/old/openalex/2026-10-14/works/part.parquet": "0" * 64
+        }
+        assert await ch.tables.receipts(table, release, prefix="openalex") == {}
+        # A receipt of a staging copy is read too; the loader judges its UUID.
+        path = "gs://raw/openalex/2026-10-14/works/part.parquet"
         result = run(
             receipt,
             tmp_path,
             uuid=str(UUID(int=2)),
             release=release,
-            path="gs://raw/openalex/2026-10-14/works/part.parquet",
+            path=path,
             hash=table.load_sql_sha256,
         )
         assert result.returncode == 0, result.stderr
-        assert await ch.tables.stale(table, release, prefix="openalex")
-        assert await ch.tables.current(table, release, prefix="openalex") == 0
-        result = run(
-            receipt,
-            tmp_path,
-            uuid=str(table.uuid),
-            release=release,
-            path="gs://raw/openalex/2026-10-14/works/part2.parquet",
-            hash=table.load_sql_sha256,
-        )
-        assert result.returncode == 0, result.stderr
-        assert await ch.tables.current(table, release, prefix="openalex") == 1
+        found = await ch.tables.receipts(table, release, prefix="openalex")
+        assert [(key, record.target_uuid) for key, record in found.items()] == [(path, UUID(int=2))]
 
 
 @needs_clickhouse

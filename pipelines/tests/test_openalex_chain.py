@@ -1,6 +1,9 @@
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from functools import partial
 
 import pytest
+from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
 
 from openknowledge_contracts.manifests import ObjectPath
 from openknowledge_contracts.tables.openalex import CONTRACTS
@@ -12,12 +15,14 @@ from openknowledge_core.ingestion import (
 )
 from openknowledge_core.ingestion.errors import IngestionError, TableRejected
 from openknowledge_core.ingestion.read_tables import BuildReadTablesResult, ReadTablesPath
+from openknowledge_pipelines import admission, bootstrap, deployments
 from openknowledge_pipelines.flows.openalex_load import (
     CORE,
     ReleaseState,
     check_release,
     load_release,
 )
+from openknowledge_pipelines.settings import LoadSettings
 
 RELEASE = "2027-01-13"
 COMMAND = OpenAlexLoad(release=RELEASE, bucket="raw")
@@ -74,6 +79,9 @@ async def test_a_release_builds_after_its_core_tables_until_a_build_succeeds() -
     async def state(release: str) -> ReleaseState:
         return ReleaseState(tuple(name for name in CONTRACTS if name not in held), built[0])
 
+    async def tidy(release: str) -> None:
+        events.append("tidy")
+
     async def take(release: str) -> OpenAlexLoadResult:
         command = OpenAlexLoad(release=release, bucket="raw")
         result = await load_release(loader(events), command, builder(events, failure[0]), state)
@@ -82,7 +90,7 @@ async def test_a_release_builds_after_its_core_tables_until_a_build_succeeds() -
         return result
 
     # A failed build leaves the core tables loaded and the others loading after it.
-    first = await check_release(latest, state, take)
+    first = await check_release(latest, state, take, tidy)
     build = events.index("build")
     assert events[:build] == list(CORE)
     assert events[build + 1 :] == [name for name in CONTRACTS if name not in CORE]
@@ -99,12 +107,62 @@ async def test_a_release_builds_after_its_core_tables_until_a_build_succeeds() -
     # The next check builds from the loaded release without loading anything.
     events.clear()
     failure[0] = None
-    rebuilt = await check_release(latest, state, take)
+    rebuilt = await check_release(latest, state, take, tidy)
     assert events == ["build"] and rebuilt is not None and rebuilt.read_tables is not None
-    # A loaded and built release starts nothing, and a run queued behind it does nothing.
+    # A loaded and built release only tidies, and a run queued behind it does nothing.
     events.clear()
-    assert await check_release(latest, state, take) is None
-    assert await take(RELEASE) == OpenAlexLoadResult() and events == []
+    assert await check_release(latest, state, take, tidy) is None
+    assert await take(RELEASE) == OpenAlexLoadResult() and events == ["tidy"]
+
+
+@pytest.mark.parametrize("busy", [True, False])
+async def test_a_current_release_drops_leftovers_only_under_a_free_loader_lease(
+    monkeypatch: pytest.MonkeyPatch, busy: bool
+) -> None:
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def lease(*, wait: bool = True) -> AsyncGenerator[None]:
+        assert not wait
+        if busy:
+            raise ConcurrencySlotAcquisitionError("a load holds ClickHouse")
+        events.append("lease")
+        yield
+
+    @asynccontextmanager
+    async def admitted() -> AsyncGenerator[None]:
+        yield
+
+    @asynccontextmanager
+    async def held(
+        settings: LoadSettings, *, prefix: str, tidy: bool = False
+    ) -> AsyncGenerator[
+        tuple[Callable[[str, str], Awaitable[bool]], Callable[[str], Awaitable[bool]]]
+    ]:
+        events.append(f"state, tidy={tidy}")
+
+        async def holds(dataset: str, release: str) -> bool:
+            return True
+
+        async def built(release: str) -> bool:
+            return True
+
+        yield holds, built
+
+    async def latest() -> str:
+        return RELEASE
+
+    async def take(release: str) -> OpenAlexLoadResult:
+        raise AssertionError("a current release is not taken")
+
+    monkeypatch.setattr(deployments, "one_clickhouse_loader", lease)
+    monkeypatch.setattr(admission, "execution", admitted)
+    monkeypatch.setattr(bootstrap, "open_held_releases", held)
+    settings = LoadSettings.model_construct()
+    state = partial(deployments._release_state, settings, prefix="openalex")  # pyright: ignore[reportPrivateUsage]
+    tidy = partial(deployments._tidy, settings, prefix="openalex")  # pyright: ignore[reportPrivateUsage]
+    assert await check_release(latest, state, take, tidy) is None
+    assert events == ["state, tidy=False"] + ([] if busy else ["lease", "state, tidy=True"])
 
 
 async def test_a_failed_new_table_neither_blocks_the_build_nor_the_tables_after_it() -> None:

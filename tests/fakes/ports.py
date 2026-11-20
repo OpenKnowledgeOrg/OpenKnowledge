@@ -377,7 +377,6 @@ class FakeTables:
         self.marked: list[str] = []
         self.keys: set[str] = set()
         self.staged = False
-        self.outdated = False
         self.staging_uuid: UUID | None = None
         self.staging_release: str | None = None
         self.staging_rows: dict[str, int] = {}
@@ -398,18 +397,14 @@ class FakeTables:
             updates=self.updates,
         )
 
-    async def stale(self, table: TableState, release: str, *, prefix: str) -> bool:
-        return self.outdated
-
-    async def current(self, table: TableState, release: str, *, prefix: str) -> int:
-        if self.outdated:
-            return 0
-        return sum(
-            record.target == table.name
-            and record.target_uuid == table.uuid
-            and record.source_release == release
+    async def receipts(
+        self, table: TableState, release: str, *, prefix: str
+    ) -> dict[str, LoadRecord]:
+        return {
+            record.source_object: record
             for record in self.records.values()
-        )
+            if record.target == table.name and record.source_release == release
+        }
 
     async def stage(self, table: TableState, release: str) -> TableState:
         if self.staging_uuid is None or self.staging_release != release:
