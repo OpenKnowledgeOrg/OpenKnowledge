@@ -3,7 +3,7 @@
 CREATE TABLE IF NOT EXISTS openalex_sdgs
 (
     id String,
-    ids Tuple(openalex Nullable(String), un Nullable(String), wikidata Nullable(String)),
+    ids Tuple(openalex Nullable(String), un Nullable(String), wikidata Nullable(String)) CODEC(ZSTD(1)),
     has_ids Bool,
     display_name Nullable(String),
     description Nullable(String),

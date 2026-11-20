@@ -3,8 +3,8 @@
 CREATE TABLE IF NOT EXISTS openalex_work_references
 (
     work_id UInt64,
-    referenced_works Array(UInt64),
-    related_works Array(UInt64),
+    referenced_works Array(UInt64) CODEC(ZSTD(1)),
+    related_works Array(UInt64) CODEC(ZSTD(1)),
     referenced_works_count Nullable(Int32),
     source_release Date,
     source_object LowCardinality(String),
@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS openalex_work_references
     removed Bool DEFAULT false
 )
 ENGINE = ReplacingMergeTree(version, is_deleted)
-ORDER BY work_id;
+ORDER BY work_id
+SETTINGS index_granularity = 1024;
 
 -- +goose Down
 DROP TABLE IF EXISTS openalex_work_references;

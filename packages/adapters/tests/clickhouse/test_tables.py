@@ -162,6 +162,10 @@ async def test_openalex_loads_from_the_contracts_archived_parquet(dataset: str) 
     assert queries[-2] == parquet_upsert_query(contract)
     settings = "\nSETTINGS max_threads = 1, max_memory_usage = 6000000000"
     assert ("max_memory_usage = 6000000000" in queries[-2]) == (dataset == "openalex-authors")
+    # A wide table's parts close at 256 MB of data, not at a row count.
+    byte_blocks = "min_insert_block_size_rows = 0, min_insert_block_size_bytes = 268435456"
+    assert (byte_blocks in queries[-2]) == (dataset == "openalex-authors")
+    assert "max_insert_block_size_rows" not in queries[-2]
     suffix = settings if dataset == "openalex-authors" else ""
     assert queries[-1] == (
         "SELECT count() AS rows FROM {table:Identifier} FINAL "

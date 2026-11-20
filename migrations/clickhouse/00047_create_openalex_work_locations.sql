@@ -3,13 +3,13 @@
 CREATE TABLE IF NOT EXISTS openalex_work_locations
 (
     work_id UInt64,
-    locations Array(Tuple(id Nullable(String), doi Nullable(String), source Tuple(id Nullable(String), display_name Nullable(String), issn_l Nullable(String), issn Array(Nullable(String)), is_oa Nullable(Bool), is_in_doaj Nullable(Bool), is_core Nullable(Bool), listed_in Array(Nullable(String)), host_organization Nullable(String), host_organization_name Nullable(String), host_organization_lineage Array(Nullable(String)), host_organization_lineage_names Array(Nullable(String)), type Nullable(String)), is_oa Nullable(Bool), is_published Nullable(Bool), landing_page_url Nullable(String), pdf_url Nullable(String), raw_source_name Nullable(String), raw_type Nullable(String), provenance Nullable(String), license Nullable(String), license_id Nullable(String), version Nullable(String), is_accepted Nullable(Bool))),
+    locations Array(Tuple(id Nullable(String), doi Nullable(String), source Tuple(id Nullable(UInt64)), is_oa Nullable(Bool), is_published Nullable(Bool), landing_page_url Nullable(String), pdf_url Nullable(String), raw_source_name Nullable(String), raw_type LowCardinality(Nullable(String)), provenance LowCardinality(Nullable(String)), license LowCardinality(Nullable(String)), license_id LowCardinality(Nullable(String)), version LowCardinality(Nullable(String)), is_accepted Nullable(Bool))) CODEC(ZSTD(1)),
     locations_count Nullable(Int32),
-    primary_location Tuple(id Nullable(String), doi Nullable(String), source Tuple(id Nullable(String), display_name Nullable(String), issn_l Nullable(String), issn Array(Nullable(String)), is_oa Nullable(Bool), is_in_doaj Nullable(Bool), is_core Nullable(Bool), listed_in Array(Nullable(String)), host_organization Nullable(String), host_organization_name Nullable(String), host_organization_lineage Array(Nullable(String)), host_organization_lineage_names Array(Nullable(String)), type Nullable(String)), is_oa Nullable(Bool), is_published Nullable(Bool), landing_page_url Nullable(String), pdf_url Nullable(String), raw_source_name Nullable(String), raw_type Nullable(String), provenance Nullable(String), license Nullable(String), license_id Nullable(String), version Nullable(String), is_accepted Nullable(Bool)),
+    primary_location Tuple(id Nullable(String), doi Nullable(String), source Tuple(id Nullable(UInt64)), is_oa Nullable(Bool), is_published Nullable(Bool), landing_page_url Nullable(String), pdf_url Nullable(String), raw_source_name Nullable(String), raw_type LowCardinality(Nullable(String)), provenance LowCardinality(Nullable(String)), license LowCardinality(Nullable(String)), license_id LowCardinality(Nullable(String)), version LowCardinality(Nullable(String)), is_accepted Nullable(Bool)) CODEC(ZSTD(1)),
     has_primary_location Bool,
-    best_oa_location Tuple(id Nullable(String), doi Nullable(String), source Tuple(id Nullable(String), display_name Nullable(String), issn_l Nullable(String), issn Array(Nullable(String)), is_oa Nullable(Bool), is_in_doaj Nullable(Bool), is_core Nullable(Bool), listed_in Array(Nullable(String)), host_organization Nullable(String), host_organization_name Nullable(String), host_organization_lineage Array(Nullable(String)), host_organization_lineage_names Array(Nullable(String)), type Nullable(String)), is_oa Nullable(Bool), is_published Nullable(Bool), landing_page_url Nullable(String), pdf_url Nullable(String), raw_source_name Nullable(String), raw_type Nullable(String), provenance Nullable(String), license Nullable(String), license_id Nullable(String), version Nullable(String), is_accepted Nullable(Bool)),
+    best_oa_location Tuple(id Nullable(String), doi Nullable(String), source Tuple(id Nullable(UInt64)), is_oa Nullable(Bool), is_published Nullable(Bool), landing_page_url Nullable(String), pdf_url Nullable(String), raw_source_name Nullable(String), raw_type LowCardinality(Nullable(String)), provenance LowCardinality(Nullable(String)), license LowCardinality(Nullable(String)), license_id LowCardinality(Nullable(String)), version LowCardinality(Nullable(String)), is_accepted Nullable(Bool)) CODEC(ZSTD(1)),
     has_best_oa_location Bool,
-    indexed_in Array(Nullable(String)),
+    indexed_in Array(LowCardinality(Nullable(String))) CODEC(ZSTD(1)),
     source_release Date,
     source_object LowCardinality(String),
     is_deleted UInt8,
@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS openalex_work_locations
     removed Bool DEFAULT false
 )
 ENGINE = ReplacingMergeTree(version, is_deleted)
-ORDER BY work_id;
+ORDER BY work_id
+SETTINGS index_granularity = 1024;
 
 -- +goose Down
 DROP TABLE IF EXISTS openalex_work_locations;

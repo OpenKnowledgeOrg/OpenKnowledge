@@ -18,7 +18,7 @@ from prefect.deployments.runner import RunnerDeployment
 from prefect.exceptions import ObjectNotFound
 from prefect.types.entrypoint import EntrypointType
 
-from openknowledge_contracts.datasets import ReleaseId
+from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
     ArchiveRelease,
@@ -41,7 +41,7 @@ from openknowledge_core.ingestion.errors import DatasetNotInRelease, IngestionEr
 from openknowledge_core.ingestion.families import ArchiveFamily, require_family
 from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 from openknowledge_pipelines import admission, bootstrap
-from openknowledge_pipelines.flows.openalex_load import check_release, load_then_build
+from openknowledge_pipelines.flows.openalex_load import check_release, load_release
 from openknowledge_pipelines.flows.s2_sync import run_sync
 from openknowledge_pipelines.flows.sync_observability import SyncObservation
 from openknowledge_pipelines.settings import (
@@ -212,7 +212,8 @@ async def s2_batch_download_embeddings_diff(command: DownloadDiff) -> BatchDiffD
 async def openalex_load(command: OpenAlexLoad, wait: bool = False) -> OpenAlexLoadResult:
     """Under the ClickHouse limit, so it never overlaps an S2 load or the read-table build.
 
-    The read tables are built after the load, and the search index follows this flow's runs.
+    The read tables are built once the core tables load, before the others; the search index
+    follows this flow's runs.
     With ``wait``, it queues behind a running S2 sync instead of refusing to start.
     """
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]
@@ -225,10 +226,10 @@ async def openalex_load(command: OpenAlexLoad, wait: bool = False) -> OpenAlexLo
         flows = bootstrap.load_flows(
             service, settings, parallelism=settings.openalex_load_parallelism
         )
-        return await load_then_build(
+        return await load_release(
             flows.dataset.fn,
-            lambda: read_tables.build(bootstrap.producer(settings), lambda: datetime.now(UTC)),
             command,
+            lambda: read_tables.build(bootstrap.producer(settings), lambda: datetime.now(UTC)),
         )
 
 
@@ -243,22 +244,22 @@ async def openalex_release_check(prefix: str = "openalex") -> OpenAlexLoadResult
         async with admission.execution(), bootstrap.open_openalex_service(settings) as service:
             return (await service.catalog.resolve_release("latest")).release_id
 
-    async def loaded(release: ReleaseId) -> bool:
+    async def lagging(release: ReleaseId) -> tuple[DatasetName, ...]:
         async with admission.execution(), bootstrap.open_held_releases(load_settings) as held:
-            for name in SOURCES["openalex"].contracts:
-                if await held(name) != release:
-                    return False
-            return True
+            return tuple(
+                [name for name in SOURCES["openalex"].contracts if await held(name) != release]
+            )
 
-    async def take(release: ReleaseId) -> OpenAlexLoadResult:
+    async def take(release: ReleaseId, datasets: tuple[DatasetName, ...]) -> OpenAlexLoadResult:
         async with admission.execution(), bootstrap.open_openalex_service(settings) as service:
             await service.pin_release(PinRelease(release=release, bucket=bucket, prefix=prefix))
         await openalex_batch_download(ArchiveRelease(release=release, bucket=bucket, prefix=prefix))
         return await openalex_load(
-            OpenAlexLoad(release=release, bucket=bucket, prefix=prefix), wait=True
+            OpenAlexLoad(release=release, bucket=bucket, prefix=prefix, datasets=datasets),
+            wait=True,
         )
 
-    return await check_release(latest, loaded, take)
+    return await check_release(latest, lagging, take)
 
 
 @flow(name="openalex-batch-download", persist_result=False)

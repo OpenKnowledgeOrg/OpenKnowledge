@@ -11,7 +11,12 @@ from openknowledge_contracts.tables.fields import (
     string_map,
     struct_of,
 )
-from openknowledge_contracts.tables.openalex.fields import stored_fields
+from openknowledge_contracts.tables.openalex.fields import (
+    LABEL,
+    openalex_id,
+    openalex_ids,
+    stored_fields,
+)
 
 _STRING = pa.string()
 _BOOL = pa.bool_()
@@ -44,14 +49,7 @@ _SUMMARY_STATS = struct_of(
     optional("i10_index", _INT),
 )
 
-_INSTITUTION = struct_of(
-    optional("id", _STRING),
-    optional("ror", _STRING),
-    optional("display_name", _STRING),
-    optional("country_code", _STRING),
-    optional("type", _STRING),
-    required("lineage", list_of(_STRING, nullable_items=True)),
-)
+_INSTITUTION = struct_of(openalex_id("id", "I"))
 
 _SUBFIELD = struct_of(
     optional("id", _STRING),
@@ -59,7 +57,7 @@ _SUBFIELD = struct_of(
 )
 
 _TOPIC_COUNT = struct_of(
-    optional("id", _STRING),
+    openalex_id("id", "T"),
     optional("display_name", _STRING),
     optional("count", _INT),
     required("subfield", _SUBFIELD),
@@ -68,7 +66,7 @@ _TOPIC_COUNT = struct_of(
 )
 
 _TOPIC_SHARE = struct_of(
-    optional("id", _STRING),
+    openalex_id("id", "T"),
     optional("display_name", _STRING),
     optional("value", _DOUBLE),
     required("subfield", _SUBFIELD),
@@ -96,7 +94,7 @@ _IDS = struct_of(
 )
 
 _PRIMARY_TOPIC = struct_of(
-    optional("id", _STRING),
+    openalex_id("id", "T"),
     optional("display_name", _STRING),
     optional("score", _DOUBLE),
     required("subfield", _SUBFIELD),
@@ -125,18 +123,18 @@ _LEAD_INVESTIGATOR = struct_of(
 )
 
 _INSTITUTION_AWARDED = struct_of(
-    optional("id", _STRING),
+    openalex_id("id", "I"),
     optional("display_name", _STRING),
     optional("ror", _STRING),
     optional("country_code", _STRING),
-    optional("type", _STRING),
-    required("lineage", list_of(_STRING, nullable_items=True)),
+    optional("type", LABEL),
+    openalex_ids("lineage", "I"),
 )
 
 _PARENT_AWARD = struct_of(
-    optional("id", _STRING),
+    openalex_id("id", "G"),
     optional("display_name", _STRING),
-    required("funder", _SUBFIELD),
+    required("funder", struct_of(openalex_id("id", "F"), optional("display_name", _STRING))),
     optional("relationship", _STRING),
     optional("asserted_by", _STRING),
 )
@@ -189,7 +187,7 @@ ENTITIES = (
                 "x_concepts",
                 list_of(
                     struct_of(
-                        optional("id", _STRING),
+                        openalex_id("id", "C"),
                         optional("wikidata", _STRING),
                         optional("display_name", _STRING),
                         optional("level", _INT),
@@ -198,30 +196,7 @@ ENTITIES = (
                     )
                 ),
             ),
-            required(
-                "sources",
-                list_of(
-                    struct_of(
-                        optional("id", _STRING),
-                        optional("display_name", _STRING),
-                        optional("issn_l", _STRING),
-                        required("issn", list_of(_STRING, nullable_items=True)),
-                        optional("is_oa", _BOOL),
-                        optional("is_in_doaj", _BOOL),
-                        optional("is_core", _BOOL),
-                        required("listed_in", list_of(_STRING, nullable_items=True)),
-                        optional("host_organization", _STRING),
-                        optional("host_organization_name", _STRING),
-                        required(
-                            "host_organization_lineage", list_of(_STRING, nullable_items=True)
-                        ),
-                        required(
-                            "host_organization_lineage_names", list_of(_STRING, nullable_items=True)
-                        ),
-                        optional("type", _STRING),
-                    )
-                ),
-            ),
+            required("sources", list_of(struct_of(openalex_id("id", "S")))),
             required("counts_by_year", list_of(_COUNTS_BY_YEAR)),
             optional("works_api_url", _STRING),
             optional("updated_date", _TIMESTAMP),
@@ -287,7 +262,7 @@ ENTITIES = (
                 "topics",
                 list_of(
                     struct_of(
-                        optional("id", _STRING),
+                        openalex_id("id", "T"),
                         optional("display_name", _STRING),
                         optional("count", _INT),
                         optional("score", _FLOAT),
@@ -536,19 +511,19 @@ ENTITIES = (
             optional("description", _STRING),
             optional("funder_award_id", _STRING),
             optional("amount", _DOUBLE),
-            optional("currency", _STRING),
+            optional("currency", LABEL),
             optional(
                 "funder",
                 struct_of(
-                    optional("id", _STRING),
+                    openalex_id("id", "F"),
                     optional("display_name", _STRING),
                     optional("ror_id", _STRING),
                     optional("doi", _STRING),
                 ),
             ),
-            optional("funding_type", _STRING),
+            optional("funding_type", LABEL),
             optional("funder_scheme", _STRING),
-            optional("provenance", _STRING),
+            optional("provenance", LABEL),
             optional("start_date", pa.date32()),
             optional("end_date", pa.date32()),
             optional("start_year", pa.int64()),
@@ -565,7 +540,7 @@ ENTITIES = (
             optional(
                 "primary_topic",
                 struct_of(
-                    optional("id", _STRING),
+                    openalex_id("id", "T"),
                     optional("display_name", _STRING),
                     optional("score", _FLOAT),
                     required("subfield", _SUBFIELD),
@@ -577,7 +552,7 @@ ENTITIES = (
                 "topics",
                 list_of(
                     struct_of(
-                        optional("id", _STRING),
+                        openalex_id("id", "T"),
                         optional("display_name", _STRING),
                         optional("score", _FLOAT),
                         required("subfield", _SUBFIELD),
@@ -591,7 +566,7 @@ ENTITIES = (
             optional(
                 "primary_topic_full",
                 struct_of(
-                    optional("id", _STRING),
+                    openalex_id("id", "T"),
                     optional("display_name", _STRING),
                     optional("score", _FLOAT),
                     required("subfield", _SUBFIELD),
@@ -603,7 +578,7 @@ ENTITIES = (
                 "topics_full",
                 list_of(
                     struct_of(
-                        optional("id", _STRING),
+                        openalex_id("id", "T"),
                         optional("display_name", _STRING),
                         optional("score", _FLOAT),
                         required("subfield", _SUBFIELD),

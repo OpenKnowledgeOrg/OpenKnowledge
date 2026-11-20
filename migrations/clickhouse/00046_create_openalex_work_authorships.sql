@@ -3,11 +3,11 @@
 CREATE TABLE IF NOT EXISTS openalex_work_authorships
 (
     work_id UInt64,
-    authorships Array(Tuple(author Tuple(display_name Nullable(String), id Nullable(String), orcid Nullable(String), observed_orcids Array(Nullable(String))), author_position Nullable(String), affiliations Array(Tuple(institution_ids Array(Nullable(String)), raw_affiliation_string Nullable(String))), countries Array(Nullable(String)), raw_author_name Nullable(String), raw_orcid Nullable(String), is_corresponding Nullable(Bool), raw_affiliation_strings Array(Nullable(String)), institutions Array(Tuple(country_code Nullable(String), display_name Nullable(String), id Nullable(String), lineage Array(Nullable(String)), ror Nullable(String), type Nullable(String))))),
+    authorships Array(Tuple(author Tuple(display_name Nullable(String), id Nullable(UInt64), orcid Nullable(String), observed_orcids Array(Nullable(String))), author_position LowCardinality(Nullable(String)), affiliations Array(Tuple(institution_ids Array(UInt64), raw_affiliation_string Nullable(String))), countries Array(LowCardinality(Nullable(String))), raw_author_name Nullable(String), raw_orcid Nullable(String), is_corresponding Nullable(Bool), raw_affiliation_strings Array(Nullable(String)), institutions Array(Tuple(id Nullable(UInt64))))) CODEC(ZSTD(1)),
     authors_count Nullable(Int32),
-    corresponding_author_ids Array(Nullable(String)),
-    corresponding_institution_ids Array(Nullable(String)),
-    institutions Array(Tuple(id Nullable(String), display_name Nullable(String), ror Nullable(String), country_code Nullable(String), type Nullable(String), lineage Array(Nullable(String)))),
+    corresponding_author_ids Array(UInt64) CODEC(ZSTD(1)),
+    corresponding_institution_ids Array(UInt64) CODEC(ZSTD(1)),
+    institutions Array(Tuple(id Nullable(UInt64))) CODEC(ZSTD(1)),
     countries_distinct_count Nullable(Int32),
     institutions_distinct_count Nullable(Int32),
     source_release Date,
@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS openalex_work_authorships
     removed Bool DEFAULT false
 )
 ENGINE = ReplacingMergeTree(version, is_deleted)
-ORDER BY work_id;
+ORDER BY work_id
+SETTINGS index_granularity = 1024;
 
 -- +goose Down
 DROP TABLE IF EXISTS openalex_work_authorships;

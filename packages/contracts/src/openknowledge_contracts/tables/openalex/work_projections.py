@@ -1,4 +1,9 @@
-"""Stored OpenAlex works projections from the archive footer schemas."""
+"""Stored OpenAlex works projections from the archive footer schemas.
+
+A work refers to sources, authors, institutions and other entities by their numeric OpenAlex ID.
+What an entity's own table holds, such as a source's name or an institution's ROR, is not
+repeated per work; what varies per work, such as an author's position, stays.
+"""
 
 import pyarrow as pa
 
@@ -8,17 +13,20 @@ from openknowledge_contracts.tables.fields import (
     list_of,
     optional,
     required,
-    string_map,
     struct_of,
 )
-from openknowledge_contracts.tables.openalex.fields import stored_fields
+from openknowledge_contracts.tables.openalex.fields import (
+    LABEL,
+    openalex_id,
+    openalex_ids,
+    stored_fields,
+)
 
 _STRING = pa.string()
 _BOOL = pa.bool_()
 _INT = pa.int32()
 _FLOAT = pa.float32()
 _DOUBLE = pa.float64()
-_TIMESTAMP = pa.timestamp("us", tz="UTC")
 
 
 def _work(group: str, fields: list[ArrowField]) -> DatasetContract:
@@ -32,36 +40,20 @@ def _work(group: str, fields: list[ArrowField]) -> DatasetContract:
     )
 
 
-_SOURCE = struct_of(
-    optional("id", _STRING),
-    optional("display_name", _STRING),
-    optional("issn_l", _STRING),
-    required("issn", list_of(_STRING, nullable_items=True)),
-    optional("is_oa", _BOOL),
-    optional("is_in_doaj", _BOOL),
-    optional("is_core", _BOOL),
-    required("listed_in", list_of(_STRING, nullable_items=True)),
-    optional("host_organization", _STRING),
-    optional("host_organization_name", _STRING),
-    required("host_organization_lineage", list_of(_STRING, nullable_items=True)),
-    required("host_organization_lineage_names", list_of(_STRING, nullable_items=True)),
-    optional("type", _STRING),
-)
-
 _LOCATION = struct_of(
     optional("id", _STRING),
     optional("doi", _STRING),
-    required("source", _SOURCE),
+    required("source", struct_of(openalex_id("id", "S"))),
     optional("is_oa", _BOOL),
     optional("is_published", _BOOL),
     optional("landing_page_url", _STRING),
     optional("pdf_url", _STRING),
     optional("raw_source_name", _STRING),
-    optional("raw_type", _STRING),
-    optional("provenance", _STRING),
-    optional("license", _STRING),
-    optional("license_id", _STRING),
-    optional("version", _STRING),
+    optional("raw_type", LABEL),
+    optional("provenance", LABEL),
+    optional("license", LABEL),
+    optional("license_id", LABEL),
+    optional("version", LABEL),
     optional("is_accepted", _BOOL),
 )
 
@@ -71,13 +63,15 @@ _SUBFIELD = struct_of(
 )
 
 _PRIMARY_TOPIC = struct_of(
-    optional("id", _STRING),
+    openalex_id("id", "T"),
     optional("display_name", _STRING),
     optional("score", _FLOAT),
     required("subfield", _SUBFIELD),
     required("field", _SUBFIELD),
     required("domain", _SUBFIELD),
 )
+
+_INSTITUTIONS = required("institutions", list_of(struct_of(openalex_id("id", "I"))))
 
 WORK_PROJECTIONS = (
     _work(
@@ -91,60 +85,34 @@ WORK_PROJECTIONS = (
                             "author",
                             struct_of(
                                 optional("display_name", _STRING),
-                                optional("id", _STRING),
+                                openalex_id("id", "A"),
                                 optional("orcid", _STRING),
                                 required("observed_orcids", list_of(_STRING, nullable_items=True)),
                             ),
                         ),
-                        optional("author_position", _STRING),
+                        optional("author_position", LABEL),
                         required(
                             "affiliations",
                             list_of(
                                 struct_of(
-                                    required(
-                                        "institution_ids", list_of(_STRING, nullable_items=True)
-                                    ),
+                                    openalex_ids("institution_ids", "I"),
                                     optional("raw_affiliation_string", _STRING),
                                 )
                             ),
                         ),
-                        required("countries", list_of(_STRING, nullable_items=True)),
+                        required("countries", list_of(LABEL, nullable_items=True)),
                         optional("raw_author_name", _STRING),
                         optional("raw_orcid", _STRING),
                         optional("is_corresponding", _BOOL),
                         required("raw_affiliation_strings", list_of(_STRING, nullable_items=True)),
-                        required(
-                            "institutions",
-                            list_of(
-                                struct_of(
-                                    optional("country_code", _STRING),
-                                    optional("display_name", _STRING),
-                                    optional("id", _STRING),
-                                    required("lineage", list_of(_STRING, nullable_items=True)),
-                                    optional("ror", _STRING),
-                                    optional("type", _STRING),
-                                )
-                            ),
-                        ),
+                        _INSTITUTIONS,
                     )
                 ),
             ),
             optional("authors_count", _INT),
-            required("corresponding_author_ids", list_of(_STRING, nullable_items=True)),
-            required("corresponding_institution_ids", list_of(_STRING, nullable_items=True)),
-            required(
-                "institutions",
-                list_of(
-                    struct_of(
-                        optional("id", _STRING),
-                        optional("display_name", _STRING),
-                        optional("ror", _STRING),
-                        optional("country_code", _STRING),
-                        optional("type", _STRING),
-                        required("lineage", list_of(_STRING, nullable_items=True)),
-                    )
-                ),
-            ),
+            openalex_ids("corresponding_author_ids", "A"),
+            openalex_ids("corresponding_institution_ids", "I"),
+            _INSTITUTIONS,
             optional("countries_distinct_count", _INT),
             optional("institutions_distinct_count", _INT),
         ],
@@ -156,14 +124,14 @@ WORK_PROJECTIONS = (
             optional("locations_count", _INT),
             optional("primary_location", _LOCATION),
             optional("best_oa_location", _LOCATION),
-            required("indexed_in", list_of(_STRING, nullable_items=True)),
+            required("indexed_in", list_of(LABEL, nullable_items=True)),
         ],
     ),
     _work(
         "references",
         [
-            required("referenced_works", list_of(pa.uint64())),
-            required("related_works", list_of(pa.uint64())),
+            openalex_ids("referenced_works", "W"),
+            openalex_ids("related_works", "W"),
             optional("referenced_works_count", _INT),
         ],
     ),
@@ -186,7 +154,7 @@ WORK_PROJECTIONS = (
                 "concepts",
                 list_of(
                     struct_of(
-                        optional("id", _STRING),
+                        openalex_id("id", "C"),
                         optional("wikidata", _STRING),
                         optional("display_name", _STRING),
                         optional("level", _INT),
@@ -217,106 +185,6 @@ WORK_PROJECTIONS = (
                 ),
             ),
             required("study_designs", list_of(_SUBFIELD)),
-        ],
-    ),
-    _work(
-        "details",
-        [
-            optional("display_name", _STRING),
-            required("ids", string_map(nullable_values=True)),
-            optional("publication_date", pa.date32()),
-            optional("created_date", _TIMESTAMP),
-            optional(
-                "biblio",
-                struct_of(
-                    optional("volume", _STRING),
-                    optional("issue", _STRING),
-                    optional("first_page", _STRING),
-                    optional("last_page", _STRING),
-                ),
-            ),
-            optional("volume", _SUBFIELD),
-            optional("cited_by_count", _INT),
-            required(
-                "counts_by_year",
-                list_of(
-                    struct_of(
-                        optional("year", _INT),
-                        optional("cited_by_count", _INT),
-                    )
-                ),
-            ),
-            required(
-                "awards",
-                list_of(
-                    struct_of(
-                        optional("id", _STRING),
-                        optional("display_name", _STRING),
-                        optional("funder_award_id", _STRING),
-                        optional("funder_id", _STRING),
-                        optional("funder_display_name", _STRING),
-                    )
-                ),
-            ),
-            required(
-                "funders",
-                list_of(
-                    struct_of(
-                        optional("id", _STRING),
-                        optional("display_name", _STRING),
-                        optional("ror", _STRING),
-                    )
-                ),
-            ),
-            optional(
-                "apc_list",
-                struct_of(
-                    optional("value", _INT),
-                    optional("currency", _STRING),
-                    optional("value_usd", _INT),
-                ),
-            ),
-            optional(
-                "apc_paid",
-                struct_of(
-                    optional("value", _DOUBLE),
-                    optional("currency", _STRING),
-                    optional("value_usd", _DOUBLE),
-                ),
-            ),
-            optional("fwci", _DOUBLE),
-            optional(
-                "citation_normalized_percentile",
-                struct_of(
-                    optional("value", _DOUBLE),
-                    optional("is_in_top_1_percent", _BOOL),
-                    optional("is_in_top_10_percent", _BOOL),
-                ),
-            ),
-            optional(
-                "cited_by_percentile_year",
-                struct_of(
-                    optional("min", _INT),
-                    optional("max", _INT),
-                ),
-            ),
-            optional(
-                "open_access",
-                struct_of(
-                    optional("is_oa", _BOOL),
-                    optional("oa_status", _STRING),
-                    optional("any_repository_has_fulltext", _BOOL),
-                    optional("oa_url", _STRING),
-                ),
-            ),
-            optional(
-                "has_content",
-                struct_of(
-                    optional("pdf", _BOOL),
-                    optional("grobid_xml", _BOOL),
-                ),
-            ),
-            optional("updated_date", _TIMESTAMP),
         ],
     ),
 )
