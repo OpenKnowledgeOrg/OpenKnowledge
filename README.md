@@ -110,11 +110,11 @@ s2-sync is refused as busy and alerts. A job orphaned by a killed `convert` bloc
 archive downloads until it ends; OpenAlex jobs are not affected.
 
 - Objects: `embeddings/specter_v2/<release>/<part>/<shard stem>.f32` and `.index.parquet`; `<part>`
-  is `base`, `updates` or `deletes`. A deletes shard has only an index.
+  is `base`, `updates` or `deletes`. A diff's sit under `<release>/from-<from_release>/<part>`. A deletes shard has only an index.
 - Format: little-endian Float32, 768 values per row, no header. Row `r` is bytes
   `[r*3072, (r+1)*3072)`, readable with one range request. A corpus ID repeated inside a shard keeps
   its last row.
-- Index: table `paper_embedding_locations` (migration `00027`), `ReplacingMergeTree(version, is_deleted)`
+- Index: table `paper_embedding_locations` (migration `00052`), `ReplacingMergeTree(version, is_deleted)`
   on `corpusid`. A paper both updated and deleted in one diff ends up deleted.
   `load-index` then writes one `applied` row; before that, lookup refuses with "no
   embedding index loaded".
@@ -124,9 +124,10 @@ archive downloads until it ends; OpenAlex jobs are not affected.
   20,000), 64 concurrent range reads, no retry; a GCS error aborts the
   call, rerun it. Its ClickHouse queries time out after `OKP_CLICKHOUSE_READ_TIMEOUT_SECONDS` (60 s),
   not the load timeout, and it needs no raw bucket. Missing and deleted IDs are both reported missing.
-- If `load-index` fails partway, rerun it; reloading is safe. A different base is refused until the
-  table is truncated. While a diff loads, and after one fails until the rerun, lookups can return
-  its rows while reporting the previous release.
+- If `load-index` fails partway, rerun it; reloading is safe. A different base needs a new table
+  (drop it and create it from migration `00052`): a truncated table keeps its `applied` record, so
+  a base into it is refused. While a diff loads, and after one fails until the rerun, a lookup of a
+  paper with rows of that diff is refused, and so is a base rerun.
 - One curated bucket holds a base and all its diffs: lookup reads every row from the bucket it is
   given. One raw archive per release: outputs are named by release, part and shard, not `--prefix`.
 - Do not delete older release prefixes under `embeddings/specter_v2/` or put them under a lifecycle

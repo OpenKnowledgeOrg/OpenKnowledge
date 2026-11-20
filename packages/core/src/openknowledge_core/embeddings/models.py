@@ -42,11 +42,16 @@ class ConvertJob(BaseModel):
     operation_id: UUID = Field(default_factory=uuid4)
 
 
-def output_prefix(release: str, part: ShardPart) -> str:
-    return f"embeddings/specter_v2/{release}/{part}"
+def output_prefix(release: str, from_release: str | None, part: ShardPart) -> str:
+    """A diff's outputs also carry the release it starts from, so two diffs never share names."""
+    if from_release is None:
+        return f"embeddings/specter_v2/{release}/{part}"
+    return f"embeddings/specter_v2/{release}/from-{from_release}/{part}"
 
 
-def output_names(release: str, part: ShardPart, source_object: str) -> tuple[str, str]:
+def output_names(
+    release: str, from_release: str | None, part: ShardPart, source_object: str
+) -> tuple[str, str]:
     """The blob and index object names converted from the raw object ``source_object``."""
-    stem = f"{output_prefix(release, part)}/{PurePosixPath(source_object).stem}"
+    stem = f"{output_prefix(release, from_release, part)}/{PurePosixPath(source_object).stem}"
     return f"{stem}.f32", f"{stem}.index.parquet"

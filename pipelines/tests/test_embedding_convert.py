@@ -54,7 +54,7 @@ def vectors(*values: float) -> bytes:
 
 
 def outputs(shard: str) -> tuple[ObjectPath, ObjectPath]:
-    blob, index = output_names(RELEASE, "base", f"s2/{RELEASE}/embeddings-specter_v2/{shard}")
+    blob, index = output_names(RELEASE, None, "base", f"s2/{RELEASE}/embeddings-specter_v2/{shard}")
     return ObjectPath(bucket=CURATED, name=blob), ObjectPath(bucket=CURATED, name=index)
 
 

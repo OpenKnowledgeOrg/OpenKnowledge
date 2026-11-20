@@ -15,6 +15,10 @@ class IndexIncomplete(IngestionError):
     """Some archived shards lack their converted output, so no index loads."""
 
 
+class IndexAhead(IngestionError):
+    """Asked papers have rows past the recorded release, from a diff loading or not finished."""
+
+
 class NoIndexLoaded(IngestionError):
     """The location table holds no loaded release, so nothing can be located."""
 

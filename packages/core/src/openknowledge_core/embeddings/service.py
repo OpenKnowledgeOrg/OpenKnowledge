@@ -11,7 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import BinaryIO
 
-from openknowledge_contracts.datasets import DiffPart
+from openknowledge_contracts.datasets import DiffPart, ReleaseId
 from openknowledge_contracts.manifests import ManifestEntry, ObjectPath, Producer
 from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.embeddings.commands import (
@@ -47,11 +47,14 @@ from openknowledge_core.ingestion.models import (
     AppliedRelease,
     JobOutcome,
     StoredObject,
+    TableState,
     held_release,
 )
 from openknowledge_core.ingestion.ports import AppliedReleases, ArtifactStore
 
 type IndexWriter = Callable[[Sequence[IndexRow], BinaryIO], None]
+
+RECREATE = "a different base needs a new table: drop it and create it from migration 00052"
 
 BLOB_TYPE = "application/octet-stream"
 INDEX_TYPE = "application/vnd.apache.parquet"
@@ -108,7 +111,9 @@ class EmbeddingConversion:
         entry = entries[command.shard]
         blob, index = (
             ObjectPath(bucket=command.curated_bucket, name=name)
-            for name in output_names(command.release, part, entry.object_ref.path.name)
+            for name in output_names(
+                command.release, command.from_release, part, entry.object_ref.path.name
+            )
         )
         with TemporaryDirectory() as scratch:
             raw, vectors, rows = (Path(scratch) / name for name in ("raw", "f32", "parquet"))
@@ -172,23 +177,15 @@ class EmbeddingIndexLoad:
     async def load(self, command: LoadEmbeddingIndex) -> LoadIndexResult:
         """Load every shard's index once all are converted, then record the release as applied.
 
-        A table takes a base only while empty or holding that release, and a diff only from the
-        release it holds, or again once it holds the diff's. A rerun writes the same rows again.
+        A table takes a base only while it never recorded one or holds that release, and a diff
+        only from the release it holds, or again once it holds the diff's. A rerun writes the same
+        rows again.
         """
         table = await self._index.table()
-        held = held_release(table, await self._applied.latest(table.name))
-        if command.from_release is None and held is None and table.has_rows:
-            leftover = sorted(await self._index.releases())
-            if leftover != [command.release]:
-                raise BaseRefused(
-                    f"{table.name} has rows of {', '.join(leftover)} from an interrupted load, "
-                    f"so it cannot take the base {command.release}; truncate it first"
-                )
-        if command.from_release is None and held not in (None, command.release):
-            raise BaseRefused(
-                f"{table.name} holds {held}, so it cannot take the base {command.release}; "
-                "a different base needs an empty or new table"
-            )
+        latest = await self._applied.latest(table.name)
+        held = held_release(table, latest)
+        if command.from_release is None:
+            await self._check_base(command.release, table, latest, held)
         if command.from_release is not None and held not in (command.from_release, command.release):
             raise DiffRefused(
                 f"{table.name} holds {held or 'no recorded release'}, so it cannot take the "
@@ -231,6 +228,39 @@ class EmbeddingIndexLoad:
         )
         return LoadIndexResult(release=command.release, rows=rows, repeated=repeated)
 
+    async def _check_base(
+        self,
+        release: ReleaseId,
+        table: TableState,
+        latest: AppliedRelease | None,
+        held: ReleaseId | None,
+    ) -> None:
+        if not table.has_rows and latest is not None and latest.target_uuid == table.uuid:
+            # The record would name its release again once the first rows of this load land.
+            raise BaseRefused(
+                f"{table.name} was emptied but still has the applied record of "
+                f"{latest.release}, so it cannot take the base {release}; {RECREATE}"
+            )
+        if held not in (None, release):
+            raise BaseRefused(
+                f"{table.name} holds {held}, so it cannot take the base {release}; {RECREATE}"
+            )
+        if not table.has_rows:
+            return
+        loaded = sorted(await self._index.releases())
+        if held is None and loaded != [release]:
+            raise BaseRefused(
+                f"{table.name} has rows of {', '.join(loaded)} from an interrupted load, "
+                f"so it cannot take the base {release}; truncate it first"
+            )
+        ahead = [other for other in loaded if held is not None and other > held]
+        if ahead:
+            raise BaseRefused(
+                f"{table.name} has rows of {', '.join(ahead)} past {held} from a diff that did "
+                "not finish; rerun that diff with okp embeddings load-index --from-release "
+                f"{held}"
+            )
+
     async def _read(self, index: StoredObject) -> bytes:
         source = await self._store.open_read(index.ref)
         async with aclosing(source.chunks) as chunks:
@@ -258,11 +288,15 @@ async def _converted(
 ) -> list[tuple[str, StoredObject | None]]:
     """Each archived shard's blob name and its index, which is None until both are written."""
     part = command.shard_part
-    prefix = ObjectPath.under(command.curated_bucket, output_prefix(command.release, part))
+    prefix = ObjectPath.under(
+        command.curated_bucket, output_prefix(command.release, command.from_release, part)
+    )
     present = {stored.ref.path.name: stored for stored in await store.list_objects(prefix)}
     converted: list[tuple[str, StoredObject | None]] = []
     for entry in await _entries(archive, command):
-        blob, index = output_names(command.release, part, entry.object_ref.path.name)
+        blob, index = output_names(
+            command.release, command.from_release, part, entry.object_ref.path.name
+        )
         written = part == "deletes" or blob in present
         converted.append((blob, present.get(index) if written else None))
     return converted

@@ -22,7 +22,7 @@ from openknowledge_core.embeddings import (
     ShardPart,
     output_names,
 )
-from openknowledge_core.embeddings.errors import NoIndexLoaded
+from openknowledge_core.embeddings.errors import IndexAhead, NoIndexLoaded
 from openknowledge_core.ingestion import DownloadDataset, DownloadDatasetService, DownloadDiff
 from openknowledge_core.ingestion.archive_progress import ArchiveProgress, completion_path
 from openknowledge_pipelines import cli
@@ -179,7 +179,7 @@ def clickhouse_sql(ports: dict[str, str], query: str) -> None:
 
 
 def blob(release: str, part: ShardPart, shard: int) -> str:
-    return output_names(release, part, f"part-{shard}.gz")[0]
+    return output_names(release, None, part, f"part-{shard}.gz")[0]
 
 
 def test_locate_before_load_is_refused(ports: dict[str, str]) -> None:
@@ -254,6 +254,18 @@ def test_base_then_diff_locates_latest_and_hides_deleted(ports: dict[str, str]) 
     command = DownloadDiff(from_release=BASE, release=NEXT, dataset=DATASET, bucket=BUCKET)
     archive(ports, diff, command)
     convert(ports, NEXT, {"updates": range(1), "deletes": range(1)}, from_release=BASE)
+    # As if the diff stopped after one shard: its delete of 3 landed, the applied row did not.
+    clickhouse_sql(
+        ports,
+        "INSERT INTO paper_embedding_locations (corpusid, object, row, source_release, is_deleted) "
+        f"VALUES (3, '', 0, '{NEXT}', 1)",
+    )
+    with pytest.raises(IndexAhead, match=f"rows of {NEXT} past the recorded {BASE}"):
+        locate(ports, [1, 3])
+    assert locate(ports, [1])[1] == {1: (blob(BASE, "base", 0), 0)}
+    code, output = load_index(ports, "--release", BASE)
+    assert code == 1
+    assert f"rows of {NEXT} past {BASE} from a diff that did not finish" in output
     expected = {"release": NEXT, "rows": 3, "repeated": 1}
     assert loaded(ports, "--release", NEXT, "--from-release", BASE) == expected
     # A rerun converges on the same rows.
@@ -265,3 +277,8 @@ def test_base_then_diff_locates_latest_and_hides_deleted(ports: dict[str, str]) 
     )
     # The most one lookup asks for, with ids as long as any.
     assert locate(ports, [10**12 + i for i in range(20_000)]) == (date.fromisoformat(NEXT), {})
+
+    clickhouse_sql(ports, "TRUNCATE TABLE paper_embedding_locations")
+    code, output = load_index(ports, "--release", BASE)
+    assert code == 1
+    assert f"was emptied but still has the applied record of {NEXT}" in output

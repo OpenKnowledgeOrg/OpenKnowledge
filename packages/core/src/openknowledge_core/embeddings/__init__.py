@@ -9,7 +9,7 @@ from openknowledge_core.embeddings.commands import (
     LoadIndexResult,
 )
 from openknowledge_core.embeddings.convert import convert_shard
-from openknowledge_core.embeddings.errors import NoIndexLoaded, TooManyIds
+from openknowledge_core.embeddings.errors import IndexAhead, NoIndexLoaded, TooManyIds
 from openknowledge_core.embeddings.lookup import (
     MAX_CONCURRENT_READS,
     MAX_LOOKUP_IDS,
@@ -48,6 +48,7 @@ __all__ = [
     "LoadEmbeddingIndex",
     "LoadIndexResult",
     "LocationIndex",
+    "IndexAhead",
     "NoIndexLoaded",
     "ShardPart",
     "TooManyIds",

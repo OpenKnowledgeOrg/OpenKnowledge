@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date
+from typing import Any
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.load_sql import sql_sha256
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases
 from openknowledge_contracts.datasets import ReleaseId
-from openknowledge_core.embeddings.errors import NoIndexLoaded
+from openknowledge_core.embeddings.errors import IndexAhead, NoIndexLoaded
 from openknowledge_core.embeddings.models import DATASET
 from openknowledge_core.ingestion.errors import TableRejected
 from openknowledge_core.ingestion.models import TableState, held_release
@@ -30,9 +31,10 @@ PAPERS = (
 RELEASES = "SELECT DISTINCT source_release AS release FROM paper_embedding_locations"
 # The IDs go into the URL, which httpx caps at 64 KiB; a UInt64 takes up to 21 bytes there.
 LOCATE_CHUNK = 2_000
+# Every row, not FINAL, so a delete past the recorded release shows too.
 LOCATE = (
-    "SELECT corpusid, object, row FROM paper_embedding_locations FINAL "
-    "WHERE corpusid IN {ids:Array(UInt64)} AND is_deleted = 0"
+    "SELECT corpusid, object, row, source_release, is_deleted FROM paper_embedding_locations "
+    "WHERE corpusid IN {ids:Array(UInt64)}"
 )
 
 
@@ -78,10 +80,30 @@ class EmbeddingLocations:
             raise NoIndexLoaded(
                 f"no embedding index loaded into {TABLE}; run okp embeddings load-index"
             )
-        located: dict[int, tuple[str, int]] = {}
+        latest: dict[int, dict[str, Any]] = {}
+        ahead: set[str] = set()
         for start in range(0, len(corpusids), LOCATE_CHUNK):
             chunk = corpusids[start : start + LOCATE_CHUNK]
             ids = "[" + ",".join(str(int(corpusid)) for corpusid in chunk) + "]"
             for row in await self._client.rows(LOCATE, ids=ids):
-                located[row["corpusid"]] = (row["object"], row["row"])
+                if row["source_release"] > held:
+                    ahead.add(row["source_release"])
+                kept = latest.get(row["corpusid"])
+                if kept is None or _version(row) > _version(kept):
+                    latest[row["corpusid"]] = row
+        if ahead:
+            raise IndexAhead(
+                f"{TABLE} has rows of {', '.join(sorted(ahead))} past the recorded {held} for "
+                "these papers; a diff is loading or did not finish, so rerun load-index first"
+            )
+        located = {
+            corpusid: (row["object"], row["row"])
+            for corpusid, row in latest.items()
+            if not row["is_deleted"]
+        }
         return date.fromisoformat(held), located
+
+
+def _version(row: dict[str, Any]) -> tuple[str, int]:
+    """The table's version order: a later release wins, and a delete wins within one."""
+    return row["source_release"], row["is_deleted"]
