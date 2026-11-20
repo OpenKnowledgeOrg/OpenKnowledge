@@ -66,6 +66,15 @@ async def test_receipts_round_trip_and_replaced_sources_need_new_applied(tmp_pat
         receipt = Indexed(plan=decision.plan, kind="part", part=1, recorded_at=datetime.now(UTC))
         await ch.indexed.record(receipt)
         assert await ch.indexed.receipts() == [receipt]
+        # A staged load records its copy's UUID just before it swaps the copy in.
+        result = run(
+            "USE source; INSERT INTO applied (target, target_uuid, release, software_version, "
+            "applied_at) VALUES ('openalex_works', generateUUIDv4(), '2026-10-14', 'test', "
+            "now64(3) + 1)",
+            tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        assert (await ch.indexed.state()).sources == state.sources
         result = run(
             "USE source; RENAME TABLE papers TO old_papers; CREATE TABLE papers AS old_papers;",
             tmp_path,

@@ -13,7 +13,7 @@ from openknowledge_core.search import IndexPapers, SearchIndexService, SettleInd
 from openknowledge_core.search.commands import IndexPapersResult
 from openknowledge_core.search.errors import SearchRejected
 from openknowledge_core.search.ports import IndexedProgress, SearchSink, SearchSource
-from openknowledge_core.search.progress import Indexed, IndexPass, plan_index
+from openknowledge_core.search.progress import Indexed, IndexPass, pass_inputs, plan_index
 from openknowledge_pipelines.flows.s2_download import retry_transient
 
 PART_RETRY_DELAYS: list[float] = [15, 30, 60]
@@ -127,10 +127,9 @@ async def run_index(
     async with execution():
         state = await progress.state()
         openalex = state.releases.get("openalex_works")
-        if (state.sources, openalex, state.built_from.get("openalex_works")) != (
-            plan.sources,
-            plan.openalex_release,
-            plan.openalex_release,
+        if (
+            pass_inputs(state.sources, openalex) != pass_inputs(plan.sources, plan.openalex_release)
+            or state.built_from.get("openalex_works") != plan.openalex_release
         ):
             raise SearchRejected("source tables changed during indexing; rerun for a new base")
         if plan.from_release is None:

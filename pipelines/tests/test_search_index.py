@@ -52,12 +52,22 @@ class Progress:
 
 
 @pytest.mark.usefixtures("prefect_server")
-@pytest.mark.parametrize("changed_sources", [False, True])
-async def test_failed_part_resumes_and_alias_switch_follows_settle(changed_sources: bool) -> None:
+@pytest.mark.parametrize("changed", [None, "papers", "openalex_works"])
+async def test_failed_part_resumes_and_alias_switch_follows_settle(changed: str | None) -> None:
     class RunProgress(Progress):
         async def state(self) -> SearchState:
             state = await super().state()
-            if changed_sources and sum(r.kind == "part" for r in self.rows) == 3:
+            if changed == "openalex_works":
+                # The same OpenAlex release reloaded into a new table during the pass.
+                late = sum(r.kind == "part" for r in self.rows) == 3
+                state = state.model_copy(
+                    update={
+                        "releases": {**state.releases, "openalex_works": "2026-10-14"},
+                        "sources": {**state.sources, "openalex_works": UUID(int=10 if late else 9)},
+                        "built_from": {"openalex_works": "2026-10-14"},
+                    }
+                )
+            if changed == "papers" and sum(r.kind == "part" for r in self.rows) == 3:
                 return state.model_copy(
                     update={"sources": {**state.sources, "papers": UUID(int=99)}}
                 )
@@ -88,7 +98,7 @@ async def test_failed_part_resumes_and_alias_switch_follows_settle(changed_sourc
     assert sink.target is None and not sink.refreshed
     original_bounds = progress.rows[0].plan
     sink.refused = None
-    if changed_sources:
+    if changed == "papers":
         with pytest.raises(SearchRejected, match="source tables changed during indexing"):
             await run()
         assert sink.target is None and not sink.refreshed
