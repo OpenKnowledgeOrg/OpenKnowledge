@@ -1,6 +1,7 @@
 from openknowledge_contracts.sources import SOURCES, contract_for
 from openknowledge_contracts.tables.clickhouse import table_columns
 from openknowledge_contracts.tables.openalex import WORKS, WORKS_ABSTRACTS
+from openknowledge_contracts.tables.s2 import AUTHORS as S2_AUTHORS
 
 
 def test_the_works_tables_have_the_agreed_columns() -> None:
@@ -26,3 +27,17 @@ def test_the_works_tables_have_the_agreed_columns() -> None:
     ]
     assert WORKS_ABSTRACTS.archived == "works"
     assert contract_for("works-abstracts") == (SOURCES["openalex"], WORKS_ABSTRACTS)
+
+
+def test_openalex_archives_have_contracts_and_authors_keep_their_own_name() -> None:
+    source = SOURCES["openalex"]
+    assert {c.archived for c in source.contracts.values()} == source.datasets.keys() - {
+        "works-deleted"
+    }
+    assert contract_for("authors") == (SOURCES["semantic-scholar"], S2_AUTHORS)
+    _, authors = contract_for("openalex-authors")
+    assert (authors.table, authors.archived, authors.key) == (
+        "openalex_authors",
+        "authors",
+        ("author_id",),
+    )

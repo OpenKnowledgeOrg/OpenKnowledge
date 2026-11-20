@@ -11,11 +11,26 @@ from types import MappingProxyType
 from openknowledge_contracts.datasets import DatasetName
 from openknowledge_contracts.tables.contract import DatasetContract
 from openknowledge_contracts.tables.openalex.abstracts import WORKS_ABSTRACTS
+from openknowledge_contracts.tables.openalex.entities import ENTITIES, SOURCES_FULL
 from openknowledge_contracts.tables.openalex.sources import OPENALEX_SOURCES
+from openknowledge_contracts.tables.openalex.work_projections import WORK_PROJECTIONS
 from openknowledge_contracts.tables.openalex.works import WORKS
 
+_WIDE = {"openalex-authors", "awards"}
+
 CONTRACTS: Mapping[DatasetName, DatasetContract] = MappingProxyType(
-    {contract.name: contract for contract in (WORKS, WORKS_ABSTRACTS, OPENALEX_SOURCES)}
+    {
+        contract.name: contract
+        for contract in (
+            OPENALEX_SOURCES,
+            SOURCES_FULL,
+            WORKS,
+            WORKS_ABSTRACTS,
+            *(contract for contract in ENTITIES if contract.name not in _WIDE),
+            *(contract for contract in ENTITIES if contract.name in _WIDE),
+            *WORK_PROJECTIONS,
+        )
+    }
 )
 
 __all__ = ["CONTRACTS", "OPENALEX_SOURCES", "WORKS", "WORKS_ABSTRACTS"]

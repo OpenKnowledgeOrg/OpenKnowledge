@@ -245,7 +245,10 @@ async def openalex_release_check(prefix: str = "openalex") -> OpenAlexLoadResult
 
     async def loaded(release: ReleaseId) -> bool:
         async with admission.execution(), bootstrap.open_held_releases(load_settings) as held:
-            return all([await held(name) == release for name in ("works", "works-abstracts")])
+            for name in SOURCES["openalex"].contracts:
+                if await held(name) != release:
+                    return False
+            return True
 
     async def take(release: ReleaseId) -> OpenAlexLoadResult:
         async with admission.execution(), bootstrap.open_openalex_service(settings) as service:
@@ -298,7 +301,7 @@ async def openalex_batch_download(command: ArchiveRelease) -> ArchiveReleaseResu
         return ArchiveReleaseResult(release_id=command.release, datasets=tuple(results))
 
 
-# What okp openalex load reads, archived before the other datasets.
+# Archive the largest entity and its companion datasets first.
 _LOADED_FIRST = ("works", "sources", "works-deleted")
 
 

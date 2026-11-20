@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, NonNegativeInt, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, NonNegativeInt, model_validator
 
 from openknowledge_contracts.datasets import DatasetName, DiffPart, ReleaseId, ShardRef
 from openknowledge_contracts.manifests import BucketName, ObjectPath, ObjectPrefix
+from openknowledge_contracts.tables.openalex import CONTRACTS as OPENALEX_CONTRACTS
 from openknowledge_core.ingestion.models import AppliedRelease, ShardOutcome, check_diff
 from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 
@@ -200,21 +201,32 @@ class ArchiveReleaseResult(BaseModel):
 
 
 class OpenAlexLoad(BaseModel):
-    """Load one archived OpenAlex release into every OpenAlex table."""
+    """Load selected OpenAlex tables or every table when no selection is given."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     release: ReleaseId
     bucket: BucketName
     prefix: ObjectPrefix = "openalex"
+    datasets: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _known_datasets(self) -> Self:
+        if unknown := sorted(set(self.datasets) - OPENALEX_CONTRACTS.keys()):
+            raise ValueError(
+                f"unknown OpenAlex --dataset {', '.join(unknown)}. "
+                f"Choose from {', '.join(OPENALEX_CONTRACTS)}"
+            )
+        return self
 
 
 class OpenAlexLoadResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    sources: LoadDatasetResult
-    works: LoadDatasetResult
-    abstracts: LoadDatasetResult
+    sources: LoadDatasetResult | None = None
+    works: LoadDatasetResult | None = None
+    abstracts: LoadDatasetResult | None = None
+    additional: dict[DatasetName, LoadDatasetResult] = Field(default_factory=dict)
     read_tables: BuildReadTablesResult | None = None
     read_tables_failure: str | None = None
     """Why the read-table build after the load failed; the load stays applied."""

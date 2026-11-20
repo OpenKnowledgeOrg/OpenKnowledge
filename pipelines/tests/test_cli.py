@@ -919,7 +919,7 @@ def test_openalex_pin_archives_the_manifest_under_openalex(store: FakeStore) -> 
 
 
 @pytest.mark.usefixtures("prefect_server")
-def test_openalex_load_fills_every_table_without_an_s2_key(
+def test_openalex_load_selects_tables_without_an_s2_key(
     monkeypatch: pytest.MonkeyPatch, oa_wired: DownloadDatasetService, store: FakeStore
 ) -> None:
     deployments.ensure_limits()
@@ -940,7 +940,18 @@ def test_openalex_load_fills_every_table_without_an_s2_key(
     monkeypatch.setattr(bootstrap, "open_load_service", open_load_service)
     for name, value in {**LOAD_ENV, "OKP_OPENALEX_LOAD_PARALLELISM": "2"}.items():
         monkeypatch.setenv(name, value)
-    code, output = okp_oa("load", "--release", OPENALEX_RELEASE, *OA_TARGET)
+    code, output = okp_oa(
+        "load",
+        "--release",
+        OPENALEX_RELEASE,
+        *OA_TARGET,
+        "--dataset",
+        "works-abstracts",
+        "--dataset",
+        "sources",
+        "--dataset",
+        "works",
+    )
     assert code == 0, output
     result = json.loads(output.splitlines()[-1])
     loads = [result[name] for name in ("sources", "works", "abstracts")]
@@ -950,6 +961,15 @@ def test_openalex_load_fills_every_table_without_an_s2_key(
         ("works-abstracts", 2),
     ]
     assert {load["live_rows"] for load in loads} == {14}
+
+
+def test_openalex_load_rejects_unknown_dataset_before_connecting() -> None:
+    code, output = okp_oa(
+        "load", "--release", OPENALEX_RELEASE, *OA_TARGET, "--dataset", "works-deleted"
+    )
+    assert code == 2
+    assert "unknown OpenAlex --dataset works-deleted" in output
+    assert "works-references" in output
 
 
 @pytest.mark.usefixtures("oa_wired")

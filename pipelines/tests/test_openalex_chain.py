@@ -1,4 +1,5 @@
 from openknowledge_contracts.manifests import ObjectPath
+from openknowledge_contracts.tables.openalex import CONTRACTS
 from openknowledge_core.ingestion import (
     LoadDataset,
     LoadDatasetResult,
@@ -7,7 +8,7 @@ from openknowledge_core.ingestion import (
 )
 from openknowledge_core.ingestion.errors import TableRejected
 from openknowledge_core.ingestion.read_tables import BuildReadTablesResult, ReadTablesPath
-from openknowledge_pipelines.flows.openalex_load import check_release, load_then_build
+from openknowledge_pipelines.flows.openalex_load import check_release, load_release, load_then_build
 
 RELEASE = "2027-01-13"
 COMMAND = OpenAlexLoad(release=RELEASE, bucket="raw")
@@ -33,7 +34,7 @@ async def test_a_new_release_is_loaded_then_built_and_a_loaded_one_starts_nothin
 
     async def build() -> BuildReadTablesResult:
         events.append("build")
-        if len(events) > 4:
+        if events.count("build") > 1:
             raise TableRejected("synthetic refusal")
         return BuildReadTablesResult(
             source_releases={"openalex_works": RELEASE},
@@ -54,13 +55,30 @@ async def test_a_new_release_is_loaded_then_built_and_a_loaded_one_starts_nothin
         return await load_then_build(load, build, COMMAND)
 
     first = await check_release(latest, loaded, take)
-    assert events == [
-        f"load {name} {RELEASE}" for name in ("sources", "works", "works-abstracts")
-    ] + ["build"]
+    names = [event.split()[1] for event in events[:-1]]
+    assert set(names) == CONTRACTS.keys()
+    assert names[:4] == ["sources", "sources-full", "works", "works-abstracts"]
+    assert names[-7:] == [
+        "openalex-authors",
+        "awards",
+        "works-authorships",
+        "works-locations",
+        "works-references",
+        "works-classifications",
+        "works-details",
+    ]
+    assert events[-1] == "build"
     assert first is not None and first.read_tables is not None
     # A loaded release starts nothing.
     assert await check_release(latest, loaded, take) is None and taken == [RELEASE]
     # A failed build leaves the load's result standing, with the reason.
     rebuilt = await load_then_build(load, build, COMMAND)
     assert rebuilt.read_tables is None and rebuilt.read_tables_failure == "synthetic refusal"
-    assert rebuilt.works.release_id == RELEASE
+    assert rebuilt.works is not None and rebuilt.works.release_id == RELEASE
+    events.clear()
+    partial = await load_release(
+        load,
+        OpenAlexLoad(release=RELEASE, bucket="raw", datasets=("works-details", "institutions")),
+    )
+    assert events == [f"load institutions {RELEASE}", f"load works-details {RELEASE}"]
+    assert tuple(partial.additional) == ("institutions", "works-details")

@@ -16,6 +16,8 @@ import posixpath
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 
+import pyarrow as pa
+
 from openknowledge_adapters.clickhouse.load_sql import (
     EXAMPLES,
     Check,
@@ -23,10 +25,13 @@ from openknowledge_adapters.clickhouse.load_sql import (
     identifier,
     literal,
     provenance,
+    removed_query,
 )
 from openknowledge_contracts.datasets import DatasetName
 from openknowledge_contracts.tables import DatasetContract
 from openknowledge_contracts.tables.fields import fields_of
+from openknowledge_contracts.tables.openalex import CONTRACTS
+from openknowledge_contracts.tables.openalex.entities import ID_PREFIXES
 
 _NO_HIVE = "use_hive_partitioning = 0"
 BROKEN_INDEX = "index_broken"
@@ -101,7 +106,7 @@ _IS_INDEX = (
     "JSONExtractArrayRaw(tupleElement(kv, 2))), JSONExtractKeysAndValuesRaw(index_json)))"
 )
 
-SELECTS: Mapping[DatasetName, Mapping[str, str]] = MappingProxyType(
+_PROJECTED: Mapping[DatasetName, Mapping[str, str]] = MappingProxyType(
     {
         "works": MappingProxyType(_WORKS),
         "works-abstracts": MappingProxyType(
@@ -145,7 +150,7 @@ _WITH: Mapping[DatasetName, tuple[tuple[str, str], ...]] = MappingProxyType(
     }
 )
 
-CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
+_PROJECTED_CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
     {
         "works": (
             (_IS_WORK, "openalex_works: id breaks the contract"),
@@ -163,6 +168,72 @@ CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
 )
 
 
+_REFERENCE_ARRAYS = ("referenced_works", "related_works")
+_FULL_RECORDS = tuple(contract for name, contract in CONTRACTS.items() if name not in _PROJECTED)
+
+# Bound both the reader's prefetch and the blocks buffered for sorting and insertion.
+_WIDE_SETTINGS = (
+    "max_threads = 1, max_download_threads = 1, "
+    "input_format_parquet_max_block_size = 8192, "
+    "input_format_parquet_prefer_block_bytes = 8388608, "
+    "input_format_parquet_memory_high_watermark = 268435456"
+)
+_WIDE_INSERT_SETTINGS = (
+    "max_insert_threads = 1, use_strict_insert_block_limits = 1, "
+    "max_insert_block_size_rows = 8192, "
+    "max_insert_block_size_bytes = 16777216"
+)
+
+
+def _wide(contract: DatasetContract) -> bool:
+    return contract in _FULL_RECORDS and contract.archived in {"works", "authors", "awards"}
+
+
+def _id_pattern(prefix: str, expression: str) -> str:
+    pattern = literal("^https://openalex[.]org/" + prefix + "[1-9][0-9]{0,18}$")
+    return f"ifNull(match({expression}, {pattern}), 0)"
+
+
+def _full_projection(contract: DatasetContract) -> dict[str, str]:
+    fields = fields_of(contract.source)
+    structs = {field.name for field in fields if isinstance(field.type, pa.StructType)}
+    selects = {field.name: identifier(field.name) for field in fields}
+    if contract.key != ("id",):
+        selects[contract.key[0]] = _WORK_ID
+    for name in selects:
+        if name.startswith("has_") and name[4:] in structs:
+            value = identifier(name[4:])
+            selects[name] = f"NOT isNotDistinctFrom({value}, defaultValueOfArgumentType({value}))"
+    if contract.name == "works-references":
+        for name in _REFERENCE_ARRAYS:
+            selects[name] = (
+                f"arrayMap(x -> toUInt64(substring(assumeNotNull(x), 23)), {identifier(name)})"
+            )
+    return selects
+
+
+def _full_checks(contract: DatasetContract) -> tuple[Check, ...]:
+    prefix = "W" if contract.archived == "works" else ID_PREFIXES.get(contract.archived)
+    conditions = {"id": _id_pattern(prefix, "id") if prefix else "notEmpty(ifNull(id, ''))"}
+    if contract.name == "works-references":
+        conditions.update(
+            (name, f"arrayAll(x -> {_id_pattern('W', 'x')}, {identifier(name)})")
+            for name in _REFERENCE_ARRAYS
+        )
+    return tuple(
+        (condition, f"{contract.table}: {name} breaks the contract")
+        for name, condition in conditions.items()
+    )
+
+
+SELECTS: Mapping[DatasetName, Mapping[str, str]] = MappingProxyType(
+    dict(_PROJECTED) | {c.name: MappingProxyType(_full_projection(c)) for c in _FULL_RECORDS}
+)
+CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
+    dict(_PROJECTED_CHECKS) | {c.name: _full_checks(c) for c in _FULL_RECORDS}
+)
+
+
 def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> str:
     """Insert every row of one Parquet object as a current row of ``contract.table``."""
     selects = SELECTS[contract.name]
@@ -176,14 +247,24 @@ def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> st
         f"NOT throwIf(NOT ({condition}), {literal(message)})"
         for condition, message in CHECKS[contract.name]
     )
+    settings = f"insert_null_as_default = 0, {_NO_HIVE}"
+    if _wide(contract):
+        settings += f", {_WIDE_SETTINGS}, {_WIDE_INSERT_SETTINGS}"
     return (
         f"INSERT INTO {identifier(contract.table)} ({columns})\n"
-        f"SETTINGS insert_null_as_default = 0, {_NO_HIVE}\n"
+        f"SETTINGS {settings}\n"
         f"{_with(contract.name)}"
         f"SELECT\n    {selected}\n"
         f"FROM {_source(source)}\n"
         f"WHERE {where}"
     )
+
+
+def parquet_removed_query(contract: DatasetContract) -> str:
+    query = removed_query(contract)
+    if _wide(contract):
+        return f"{query}\nSETTINGS max_threads = 1, {_WIDE_INSERT_SETTINGS}"
+    return query
 
 
 def broken_indexes_query(contract: DatasetContract) -> str | None:
@@ -225,7 +306,7 @@ def parquet_duplicates_query(contract: DatasetContract, source: Source = "s3") -
         f"    groupArrayIf({EXAMPLES})(toString(record_key), conflicting) AS examples\n"
         f"FROM (\n{keys}\n)\n"
         f"SETTINGS {_NO_HIVE}, max_bytes_ratio_before_external_group_by = 0.5, "
-        "replace_running_query = 1"
+        "replace_running_query = 1" + (f", {_WIDE_SETTINGS}" if _wide(contract) else "")
     )
 
 

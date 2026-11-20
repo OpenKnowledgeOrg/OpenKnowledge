@@ -9,7 +9,7 @@ from openknowledge_adapters.clickhouse.load_sql import sql_sha256
 from openknowledge_adapters.clickhouse.parquet_sql import parquet_upsert_query
 from openknowledge_contracts.manifests import ObjectPath, ObjectRef
 from openknowledge_contracts.tables.clickhouse import version_expression
-from openknowledge_contracts.tables.openalex import WORKS_ABSTRACTS
+from openknowledge_contracts.tables.openalex import CONTRACTS as OPENALEX_CONTRACTS
 from openknowledge_contracts.tables.s2 import CITATIONS
 from openknowledge_core.ingestion import LoadDataset, LoadDatasetService
 from openknowledge_core.ingestion.errors import (
@@ -129,7 +129,9 @@ async def test_applied_took_and_rebased_match_target_uuid_and_releases(found: bo
         assert await ch.applied.rebased("papers", target_uuid, "2026-10-06", "2026-10-13") is found
 
 
-async def test_abstracts_load_from_the_archived_works_parquet() -> None:
+@pytest.mark.parametrize("dataset", ["works-abstracts", "openalex-authors"])
+async def test_openalex_loads_from_the_contracts_archived_parquet(dataset: str) -> None:
+    contract = OPENALEX_CONTRACTS[dataset]
     queries: list[str] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -140,20 +142,21 @@ async def test_abstracts_load_from_the_archived_works_parquet() -> None:
         return httpx.Response(200, headers={"X-ClickHouse-Summary": '{"written_rows": "2"}'})
 
     path = ObjectPath(
-        bucket="raw", name="openalex/2026-10-14/works/updated_date=2026-10-14/part_0000.parquet"
+        bucket="raw",
+        name=f"openalex/2026-10-14/{contract.archived}/updated_date=2026-10-14/part_0000.parquet",
     )
     async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
-        table = await ch.tables.table("works-abstracts")
+        table = await ch.tables.table(dataset)
         written = await ch.tables.load(
             LoadObject(
-                dataset="works-abstracts",
+                dataset=dataset,
                 release="2026-10-14",
                 object_ref=ObjectRef(path=path, generation=1),
             )
         )
-    assert (table.archive, table.name, written) == ("works", "openalex_abstracts", 2)
-    assert table.load_sql_sha256 == sql_sha256(parquet_upsert_query(WORKS_ABSTRACTS))
-    assert queries[-1] == parquet_upsert_query(WORKS_ABSTRACTS)
+    assert (table.archive, table.name, written) == (contract.archived, contract.table, 2)
+    assert table.load_sql_sha256 == sql_sha256(parquet_upsert_query(contract))
+    assert queries[-1] == parquet_upsert_query(contract)
 
 
 async def test_a_retried_parquet_duplicates_check_keeps_its_query_id() -> None:

@@ -6,6 +6,7 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from openknowledge_contracts.datasets import ReleaseId
+from openknowledge_contracts.tables.openalex import CONTRACTS
 from openknowledge_core.ingestion import (
     LoadDataset,
     LoadDatasetResult,
@@ -31,10 +32,17 @@ async def load_release(
             release=command.release, dataset=name, bucket=command.bucket, prefix=command.prefix
         )
 
-    sources = await load(dataset("sources"))
-    works = await load(dataset("works"))
-    abstracts = await load(dataset("works-abstracts"))
-    return OpenAlexLoadResult(sources=sources, works=works, abstracts=abstracts)
+    results = {
+        name: await load(dataset(name))
+        for name in CONTRACTS
+        if not command.datasets or name in command.datasets
+    }
+    return OpenAlexLoadResult(
+        sources=results.pop("sources", None),
+        works=results.pop("works", None),
+        abstracts=results.pop("works-abstracts", None),
+        additional=results,
+    )
 
 
 async def load_then_build(
@@ -60,7 +68,7 @@ async def check_release(
     loaded: Callable[[ReleaseId], Awaitable[bool]],
     take: Callable[[ReleaseId], Awaitable[OpenAlexLoadResult]],
 ) -> OpenAlexLoadResult | None:
-    """Take OpenAlex's release in until both OpenAlex tables hold it; then start nothing.
+    """Take OpenAlex's release in until every OpenAlex table holds it; then start nothing.
 
     Archive and load resume from their receipts, so a release whose archive or load failed is
     taken up again, and only the missing objects are downloaded or loaded.

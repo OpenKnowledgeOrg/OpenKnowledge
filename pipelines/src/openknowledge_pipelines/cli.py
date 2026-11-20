@@ -457,8 +457,11 @@ def openalex_archive(release: str, bucket: str, prefix: str, dataset: str | None
 @click.option("--release", required=True, help=OA_RELEASE_HELP)
 @click.option("--bucket", required=True, help="Bucket holding the archive, without gs://.")
 @click.option("--prefix", default=OA_PREFIX, show_default=True, help=PREFIX_HELP)
-def openalex_load(release: str, bucket: str, prefix: str) -> None:
-    command = _command(OpenAlexLoad, OA_RULES, release=release, bucket=bucket, prefix=prefix)
+@click.option("--dataset", multiple=True, help="Load only this dataset. Repeat to select more.")
+def openalex_load(release: str, bucket: str, prefix: str, dataset: tuple[str, ...]) -> None:
+    command = _command(
+        OpenAlexLoad, OA_RULES, release=release, bucket=bucket, prefix=prefix, datasets=dataset
+    )
     settings = _settings(LoadSettings)
 
     async def run() -> OpenAlexLoadResult:

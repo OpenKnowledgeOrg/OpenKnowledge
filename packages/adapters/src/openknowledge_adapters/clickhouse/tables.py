@@ -12,7 +12,6 @@ from openknowledge_adapters.clickhouse.load_sql import (
     duplicates_parameters,
     duplicates_query,
     query_parameters,
-    removed_query,
     sql_sha256,
     upsert_query,
 )
@@ -20,6 +19,7 @@ from openknowledge_adapters.clickhouse.parquet_sql import (
     broken_indexes_query,
     parquet_duplicates_parameters,
     parquet_duplicates_query,
+    parquet_removed_query,
     parquet_upsert_query,
 )
 from openknowledge_contracts.datasets import DatasetName, ReleaseId
@@ -146,7 +146,9 @@ class ClickHouseTables:
         return Duplicates.model_validate(rows[0])
 
     async def mark_removed(self, dataset: DatasetName, release: ReleaseId) -> int:
-        return await self._client.written(removed_query(_contract(dataset)), source_release=release)
+        return await self._client.written(
+            parquet_removed_query(_contract(dataset)), source_release=release
+        )
 
     def _readable(self, path: ObjectPath) -> ObjectPath:
         if path.bucket != self._raw_bucket:
