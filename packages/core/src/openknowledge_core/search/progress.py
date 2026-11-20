@@ -15,6 +15,18 @@ WEEKLY = frozenset({"papers", "abstracts", "tldrs", "paper_abstract_best"})
 """The tables a pass reads, which must be applied at one release."""
 
 
+RELEASE_ONLY = frozenset({"openalex_works"})
+"""Tables a pass follows by release alone. Documents take their OpenAlex text from
+``paper_abstract_best``, so reloading the same OpenAlex release into a new table changes
+nothing indexed."""
+
+
+def _inputs(
+    sources: dict[str, UUID], openalex: ReleaseId | None
+) -> tuple[dict[str, UUID], ReleaseId | None]:
+    return {name: uuid for name, uuid in sources.items() if name not in RELEASE_ONLY}, openalex
+
+
 class SearchState(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -75,8 +87,8 @@ def plan_index(
     current = [r for r in receipts if r.plan.contract_version == PAPERS.version]
     complete = [r.plan for r in current if r.kind == "complete"]
     live = complete[-1] if complete else None
-    inputs = (state.sources, openalex)
-    base = live is None or (live.sources, live.openalex_release) != inputs
+    inputs = _inputs(state.sources, openalex)
+    base = live is None or _inputs(live.sources, live.openalex_release) != inputs
     if not base and live is not None and live.release >= release:
         return SearchPlan(plan=live, reason="current")
     if base:
@@ -85,7 +97,7 @@ def plan_index(
             for r in current
             if r.kind == "started"
             and r.plan.from_release is None
-            and (r.plan.sources, r.plan.openalex_release) == inputs
+            and _inputs(r.plan.sources, r.plan.openalex_release) == inputs
             and r.plan.parts == base_parts
             and r.plan not in complete
         ]
@@ -102,7 +114,7 @@ def plan_index(
         r
         for r in current
         if r.plan.release == release
-        and (r.plan.sources, r.plan.openalex_release) == inputs
+        and _inputs(r.plan.sources, r.plan.openalex_release) == inputs
         and r.plan.parts == parts
         and r.plan.from_release == start
     ]
@@ -112,7 +124,7 @@ def plan_index(
             reason="base" if base else "diff",
             finished=frozenset(r.part for r in matching if r.kind == "part"),
         )
-    fingerprint = sha256(str((sorted(state.sources.items()), openalex)).encode()).hexdigest()[:12]
+    fingerprint = sha256(str((sorted(inputs[0].items()), openalex)).encode()).hexdigest()[:12]
     index = (
         f"papers-v{PAPERS.version}-{release}-{fingerprint}" if base else live.index if live else ""
     )

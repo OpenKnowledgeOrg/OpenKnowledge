@@ -108,3 +108,19 @@ def test_openalex_is_outside_the_one_release_check_but_must_have_built_the_read_
     result = plan_index(behind, [], base_parts=4, diff_parts=4)
     assert result.plan is None
     assert result.reason == "paper_abstract_best is not built from the loaded OpenAlex release"
+
+
+def test_a_reload_of_the_same_openalex_release_keeps_the_index() -> None:
+    old = plan_index(state(openalex="2026-10-14"), [], base_parts=4, diff_parts=4).plan
+    assert old is not None
+    done = Indexed(plan=old, kind="complete", recorded_at=datetime.now(UTC))
+    reloaded = state(openalex="2026-10-14")
+    reloaded = reloaded.model_copy(
+        update={"sources": {**reloaded.sources, "openalex_works": UUID(int=10)}}
+    )
+    assert plan_index(reloaded, [done], base_parts=4, diff_parts=4).reason == "current"
+    weekly = dict.fromkeys((*SOURCES, "paper_abstract_best"), "2026-11-10")
+    later = reloaded.model_copy(update={"releases": {**reloaded.releases, **weekly}})
+    diff = plan_index(later, [done], base_parts=4, diff_parts=4)
+    assert diff.reason == "diff" and diff.plan is not None
+    assert diff.plan.index == done.plan.index
