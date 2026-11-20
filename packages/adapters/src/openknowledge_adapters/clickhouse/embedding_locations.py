@@ -80,7 +80,8 @@ class EmbeddingLocations:
 
     async def locate(self, corpusids: Sequence[int]) -> tuple[date, dict[int, tuple[str, int]]]:
         """The release the table holds, and the blob and row of each live paper among these."""
-        held = held_release(await self.table(), await self._applied.latest(TABLE))
+        table = await self.table()
+        held = held_release(table, await self._applied.latest(TABLE))
         if held is None:
             raise NoIndexLoaded(
                 f"no embedding index loaded into {TABLE}; run okp embeddings load-index"
@@ -94,6 +95,8 @@ class EmbeddingLocations:
                 located[row["corpusid"]] = (row["object"], row["row"])
             # After LOCATE, so a row it read that a diff inserted meanwhile shows here too.
             ahead |= {row["release"] for row in await self._client.rows(AHEAD, ids=ids, held=held)}
+        if (await self.table()).uuid != table.uuid:
+            raise IndexAhead(f"{TABLE} was replaced while it was read; look up again")
         if ahead:
             raise IndexAhead(
                 f"{TABLE} has rows of {', '.join(sorted(ahead))} past the recorded {held} for "

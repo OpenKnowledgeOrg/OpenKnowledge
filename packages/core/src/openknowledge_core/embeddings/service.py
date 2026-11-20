@@ -257,15 +257,22 @@ class EmbeddingIndexLoad:
         latest: AppliedRelease | None,
         held: ReleaseId | None,
     ) -> None:
-        if not table.has_rows and latest is not None and latest.target_uuid == table.uuid:
+        if not table.has_rows:
             # The record would name its release again once the first rows of this load land.
-            raise BaseRefused(
-                f"{table.name} was emptied but still has the applied record of "
-                f"{latest.release}, so it cannot take the base {release}; {RECREATE}"
-            )
+            own = await self._applied.latest(table.name, table.uuid)
+            if own is not None:
+                raise BaseRefused(
+                    f"{table.name} was emptied but still has the applied record of "
+                    f"{own.release}, so it cannot take the base {release}; {RECREATE}"
+                )
         if held not in (None, release):
             raise BaseRefused(
                 f"{table.name} holds {held}, so it cannot take the base {release}; {RECREATE}"
+            )
+        if latest is not None and held == release and latest.from_release is not None:
+            raise BaseRefused(
+                f"{table.name} took {held} from {latest.from_release}, so the base {release} "
+                "is not a rerun of that load"
             )
         if held is not None or not table.has_rows:
             return
