@@ -278,6 +278,10 @@ def test_base_then_diff_locates_latest_and_hides_deleted(ports: dict[str, str]) 
     # The most one lookup asks for, with ids as long as any.
     assert locate(ports, [10**12 + i for i in range(20_000)]) == (date.fromisoformat(NEXT), {})
 
+    code, output = load_index(ports, "--release", NEXT, "--from-release", "2026-09-29")
+    assert code == 1
+    assert f"took {NEXT} from {BASE}, so the diff from 2026-09-29 is not a rerun" in output
+
     clickhouse_sql(ports, "TRUNCATE TABLE paper_embedding_locations")
     code, output = load_index(ports, "--release", BASE)
     assert code == 1

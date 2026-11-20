@@ -186,11 +186,33 @@ class EmbeddingIndexLoad:
         held = held_release(table, latest)
         if command.from_release is None:
             await self._check_base(command.release, table, latest, held)
-        if command.from_release is not None and held not in (command.from_release, command.release):
+        elif held not in (command.from_release, command.release):
             raise DiffRefused(
                 f"{table.name} holds {held or 'no recorded release'}, so it cannot take the "
                 f"diff from {command.from_release} to {command.release}"
             )
+        elif (
+            latest is not None
+            and held == command.release
+            and latest.from_release != command.from_release
+        ):
+            raise DiffRefused(
+                f"{table.name} took {held} from {latest.from_release or 'its base'}, so the diff "
+                f"from {command.from_release} is not a rerun of that load"
+            )
+        if held is not None and table.has_rows:
+            ahead = [
+                other
+                for other in sorted(await self._index.releases())
+                if other > held and other != command.release
+            ]
+            if ahead:
+                refused = DiffRefused if command.from_release else BaseRefused
+                raise refused(
+                    f"{table.name} has rows of {', '.join(ahead)} past {held} from a diff that "
+                    "did not finish; rerun that diff with okp embeddings load-index "
+                    f"--from-release {held} first"
+                )
         diff = command.from_release is not None
         parts: tuple[DiffPart | None, ...] = ("updates", "deletes") if diff else (None,)
         indexes: list[tuple[str, StoredObject]] = []
@@ -245,20 +267,13 @@ class EmbeddingIndexLoad:
             raise BaseRefused(
                 f"{table.name} holds {held}, so it cannot take the base {release}; {RECREATE}"
             )
-        if not table.has_rows:
+        if held is not None or not table.has_rows:
             return
         loaded = sorted(await self._index.releases())
-        if held is None and loaded != [release]:
+        if loaded != [release]:
             raise BaseRefused(
                 f"{table.name} has rows of {', '.join(loaded)} from an interrupted load, "
                 f"so it cannot take the base {release}; truncate it first"
-            )
-        ahead = [other for other in loaded if held is not None and other > held]
-        if ahead:
-            raise BaseRefused(
-                f"{table.name} has rows of {', '.join(ahead)} past {held} from a diff that did "
-                "not finish; rerun that diff with okp embeddings load-index --from-release "
-                f"{held}"
             )
 
     async def _read(self, index: StoredObject) -> bytes:

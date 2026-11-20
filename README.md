@@ -127,7 +127,8 @@ archive downloads until it ends; OpenAlex jobs are not affected.
 - If `load-index` fails partway, rerun it; reloading is safe. A different base needs a new table
   (drop it and create it from migration `00052`): a truncated table keeps its `applied` record, so
   a base into it is refused. While a diff loads, and after one fails until the rerun, a lookup of a
-  paper with rows of that diff is refused, and so is a base rerun.
+  paper with rows of that diff is refused, and so is any other load. A diff rerun must start from
+  the release the recorded load started from.
 - One curated bucket holds a base and all its diffs: lookup reads every row from the bucket it is
   given. One raw archive per release: outputs are named by release, part and shard, not `--prefix`.
 - Do not delete older release prefixes under `embeddings/specter_v2/` or put them under a lifecycle
