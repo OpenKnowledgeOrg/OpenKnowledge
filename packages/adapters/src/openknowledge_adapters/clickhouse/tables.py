@@ -70,7 +70,7 @@ def swap_statements(table: str) -> tuple[str, str]:
 
 
 class ClickHouseTables:
-    def __init__(self, client: ClickHouseClient, *, raw_bucket: str) -> None:
+    def __init__(self, client: ClickHouseClient, *, raw_bucket: str | None) -> None:
         self._client = client
         self._raw_bucket = raw_bucket
 
@@ -124,6 +124,8 @@ class ClickHouseTables:
     async def receipts(
         self, table: TableState, release: ReleaseId, *, prefix: str
     ) -> dict[str, LoadRecord]:
+        if self._raw_bucket is None:
+            raise TableRejected("no raw bucket configured, so no archive was loaded")
         archive = ObjectPath.under(self._raw_bucket, prefix.strip("/"), release, table.archive)
         rows = await self._client.rows(
             f"SELECT {RECORD_COLUMNS} FROM loads FINAL WHERE target = {{target:String}} "

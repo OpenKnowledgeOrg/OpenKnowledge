@@ -51,10 +51,15 @@ class OpenAlexSettings(CommonSettings):
     openalex_timeout_seconds: PositiveFloat = 30.0
 
 
-class LoadSettings(CommonSettings):
+class ClickHouseSettings(CommonSettings):
     clickhouse_url: HttpUrl
     clickhouse_user: str = "openknowledge"
     clickhouse_password: SecretStr = Field(validation_alias="CLICKHOUSE_PASSWORD")
+    clickhouse_read_timeout_seconds: PositiveFloat = 60.0
+    """Per query of a read such as okp embeddings lookup, in place of the load timeout."""
+
+
+class LoadSettings(ClickHouseSettings):
     clickhouse_raw_bucket: BucketName
     """The bucket the server's ``raw`` named collection reads."""
     clickhouse_timeout_seconds: PositiveFloat = 3600.0

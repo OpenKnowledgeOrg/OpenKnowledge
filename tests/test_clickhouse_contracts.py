@@ -37,6 +37,7 @@ DERIVED = {
     "citation_edges_in",
     "paper_xwalk",
     "paper_abstract_best",
+    "paper_embedding_locations",
 }
 
 
