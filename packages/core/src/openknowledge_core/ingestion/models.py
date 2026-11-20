@@ -249,11 +249,18 @@ class ShardOutcome(StrEnum):
 
 
 class TableState(BaseModel):
-    """A dataset's table when a load starts, whose UUID changes when it is created again."""
+    """A dataset's table when a load starts, whose UUID changes when it is created again.
+
+    A ``staged`` table takes a release into a copy that then replaces it whole. While the copy
+    is loaded, ``into`` names it and ``uuid`` and ``has_rows`` are its own; ``name`` stays the
+    live table, which receipts and markers name.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     name: str
+    into: str
+    staged: bool
     dataset: DatasetName
     archive: DatasetName
     uuid: UUID
@@ -315,6 +322,7 @@ class LoadObject(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     dataset: DatasetName
+    into: str
     release: ReleaseId
     object_ref: ObjectRef
     operation: Operation = "upsert"

@@ -86,6 +86,27 @@ class ArtifactStore(Protocol):
 class TableLoader(Protocol):
     async def table(self, dataset: DatasetName) -> TableState: ...
 
+    async def stale(self, table: TableState, release: ReleaseId, *, prefix: str) -> bool:
+        """Whether an object of ``release`` under ``prefix`` has a receipt not current for it.
+
+        A receipt is current when it names the table's UUID and the SQL it loads with now.
+        """
+        ...
+
+    async def stage(self, table: TableState, release: ReleaseId) -> TableState:
+        """The empty staging copy of a staged table, or the one a run of ``release`` left.
+
+        Raises TableRejected where the database cannot exchange tables.
+        """
+        ...
+
+    async def swap(self, table: TableState) -> None:
+        """Exchange the staging copy ``table`` loaded with the live table, then drop the old one.
+
+        Given the live table, it only drops a staging copy left behind.
+        """
+        ...
+
     async def loaded(
         self, dataset: DatasetName, source_object: ObjectPath
     ) -> LoadRecord | None: ...
@@ -96,9 +117,9 @@ class TableLoader(Protocol):
 
     async def record(self, record: LoadRecord) -> None: ...
 
-    async def live_rows(self, dataset: DatasetName, release: ReleaseId) -> int: ...
+    async def live_rows(self, table: TableState, release: ReleaseId) -> int: ...
 
-    async def broken_indexes(self, dataset: DatasetName, release: ReleaseId) -> int:
+    async def broken_indexes(self, table: TableState, release: ReleaseId) -> int:
         """Live rows of ``release`` whose abstract index was unreadable and loaded empty."""
         ...
 

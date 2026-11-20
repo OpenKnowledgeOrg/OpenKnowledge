@@ -93,7 +93,7 @@ class SyncTables(FakeTables):
             update={"updates": CONTRACTS[dataset].updates}
         )
 
-    async def live_rows(self, dataset: str, release: str) -> int:
+    async def live_rows(self, table: TableState, release: str) -> int:
         return 1  # one key in the snapshot fixture
 
 

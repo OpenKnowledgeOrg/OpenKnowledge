@@ -2,7 +2,8 @@
 
 An insert is not atomic: a record that breaks the contract leaves the rows before it, and a
 dropped connection leaves an unknown part. Both converge, because a rerun writes the same rows
-again and the table keeps one row per key and version.
+again and the table keeps one row per key and version. A staged table loads into a copy, so
+its live table shows only whole releases.
 """
 
 from __future__ import annotations
@@ -83,7 +84,11 @@ class LoadDatasetService:
         self._observer = observer
 
     async def prepare(self, command: LoadDataset) -> PreparedLoad:
-        """A table that holds a release takes only that base again, or a newer snapshot."""
+        """A table that holds a release takes only that base again, or a newer snapshot.
+
+        A staged table loads into its staging copy, unless it holds the release under current
+        receipts already, when the load only checks it again.
+        """
         table = await self._tables.table(command.dataset)
         held = held_release(table, await self._applied.latest(table.name))
         if held is not None and (
@@ -98,6 +103,11 @@ class LoadDatasetService:
         )
         hint = BASE_HINTS[contract_for(table.dataset)[0].name]
         manifest = await self._manifest(path, command.release, table.archive, hint)
+        if table.staged and (
+            held != command.release
+            or await self._tables.stale(table, command.release, prefix=command.prefix)
+        ):
+            table = await self._tables.stage(table, command.release)
         prepared = PreparedLoad(manifest_path=path, manifest=manifest, table=table)
         if self._observer is not None:
             await self._observer.planned(prepared)
@@ -165,6 +175,7 @@ class LoadDatasetService:
         written = await self._tables.load(
             LoadObject(
                 dataset=table.dataset,
+                into=table.into,
                 release=manifest.release_id,
                 object_ref=entry.object_ref,
                 operation=operation,
@@ -202,22 +213,29 @@ class LoadDatasetService:
         """A base release holds each key once, so its live rows must equal its records.
 
         Only when they differ are the objects read again, to distinguish identical repeats and
-        compatible citation context enrichments from conflicts. Only a release that passes flags
-        the keys it no longer lists in a snapshot table and is recorded as the release it holds.
+        compatible citation context enrichments from conflicts. Only a release that passes is
+        recorded as the release the table holds. A staged table then swaps its copy in; another
+        snapshot table flags the keys the release no longer lists.
         """
         manifest, table = prepared.manifest, prepared.table
+        if table.staged:
+            current = await self._tables.table(table.dataset)
+            if current.uuid == table.uuid:
+                table = current  # a retry after the swap checks the copy it swapped in
         records = _record_count(prepared)
-        live = await self._tables.live_rows(table.dataset, manifest.release_id)
-        broken = await self._tables.broken_indexes(table.dataset, manifest.release_id)
+        live = await self._tables.live_rows(table, manifest.release_id)
+        broken = await self._tables.broken_indexes(table, manifest.release_id)
         duplicates = (
             Duplicates(identical_rows=0, conflicting_keys=0, examples=())
             if live == records
             else await self._reconcile(prepared, records, live)
         )
         removed = 0
-        if table.updates == "snapshot":
+        if table.updates == "snapshot" and not table.staged:
             removed = await self._tables.mark_removed(table.dataset, manifest.release_id)
         await self._record(table, manifest.release_id, None)
+        if table.staged:
+            await self._tables.swap(table)
         counts = Counter(outcomes)
         return LoadDatasetResult(
             release_id=manifest.release_id,

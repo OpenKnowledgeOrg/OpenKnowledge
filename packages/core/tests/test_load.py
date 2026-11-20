@@ -24,8 +24,9 @@ from openknowledge_core.ingestion.errors import (
     IngestionError,
     ObjectChanged,
     RowCountMismatch,
+    TableUnavailable,
 )
-from openknowledge_core.ingestion.models import Duplicates
+from openknowledge_core.ingestion.models import Duplicates, TableState
 from tests.fakes.ports import (
     COMMAND,
     DIFF,
@@ -83,10 +84,13 @@ def loader(store: FakeStore, tables: FakeTables, applied: FakeApplied) -> LoadDa
 
 
 async def load(
-    store: FakeStore, tables: FakeTables, applied: FakeApplied | None = None
+    store: FakeStore,
+    tables: FakeTables,
+    applied: FakeApplied | None = None,
+    command: LoadDataset = LOAD,
 ) -> LoadDatasetResult:
     service = loader(store, tables, applied or FakeApplied())
-    prepared = await service.prepare(LOAD)
+    prepared = await service.prepare(command)
     outcomes = [await service.load_object(prepared, entry) for entry in prepared.manifest.entries]
     return await service.finish(prepared, outcomes)
 
@@ -244,6 +248,75 @@ async def test_only_a_base_load_that_passes_flags_and_records_what_the_table_hol
     with pytest.raises(BaseRefused, match=f"holds {RELEASE}, so it cannot take the base {refused}"):
         await loader(store, tables, applied).prepare(LOAD.model_copy(update={"release": refused}))
     assert (tables.loads, tables.marked, applied.records) == before
+
+
+@pytest.fixture
+async def staged(
+    service: DownloadDatasetService, source: FakeSource, tables: FakeTables
+) -> FakeTables:
+    """A snapshot table loaded through a staging copy, with the next release archived too."""
+    source.releases.append(NEXT)
+    pinned = await service.pin_dataset(COMMAND.model_copy(update={"release": NEXT}))
+    for shard in pinned.shards:
+        await service.archive_shard(pinned, shard)
+    await service.write_manifest(pinned)
+    tables.staged, tables.updates, tables.flagged = True, "snapshot", 3
+    return tables
+
+
+LOAD_NEXT = LOAD.model_copy(update={"release": NEXT})
+
+
+def held(applied: FakeApplied) -> list[tuple[UUID, str]]:
+    return [(found.target_uuid, found.release) for found in applied.records]
+
+
+async def test_a_staged_table_takes_each_release_through_a_copy_it_swaps_in(
+    store: FakeStore, staged: FakeTables
+) -> None:
+    applied = FakeApplied()
+    first = await load(store, staged, applied)
+    assert (first.loaded, staged.copies, staged.swaps, staged.uuid) == (2, 1, 1, UUID(int=101))
+    # Holding the release under current receipts, the table is only checked again.
+    again = await load(store, staged, applied)
+    assert (again.loaded, again.already_loaded, staged.copies, staged.swaps) == (0, 2, 1, 2)
+    result = await load(store, staged, applied, LOAD_NEXT)
+    assert (result.loaded, result.live_rows, result.removed, staged.marked) == (2, 51, 0, [])
+    assert (staged.copies, staged.uuid) == (2, UUID(int=102))
+    assert held(applied) == [(UUID(int=101), RELEASE)] * 2 + [(UUID(int=102), NEXT)]
+
+
+async def test_a_failed_check_or_a_crash_before_the_swap_leaves_the_live_table(
+    store: FakeStore, staged: FakeTables, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    applied = FakeApplied()
+    await load(store, staged, applied)
+    staged.collapsed = 1
+    with pytest.raises(RowCountMismatch):
+        await load(store, staged, applied, LOAD_NEXT)
+    assert (staged.uuid, staged.swaps, held(applied)) == (
+        UUID(int=101),
+        1,
+        [(UUID(int=101), RELEASE)],
+    )
+    staged.collapsed = 0
+
+    async def crash(table: TableState) -> None:
+        raise TableUnavailable("the connection dropped")
+
+    monkeypatch.setattr(staged, "swap", crash)
+    with pytest.raises(TableUnavailable):
+        await load(store, staged, applied, LOAD_NEXT)
+    assert (staged.uuid, held(applied)[-1]) == (UUID(int=101), (UUID(int=102), NEXT))
+    monkeypatch.undo()
+    # The marker names the copy, so the live table holds no release; the copy is reused.
+    service = loader(store, staged, applied)
+    prepared = await service.prepare(LOAD_NEXT)
+    outcomes = [await service.load_object(prepared, entry) for entry in prepared.manifest.entries]
+    await service.finish(prepared, outcomes)
+    retried = await service.finish(prepared, outcomes)
+    assert (retried.already_loaded, retried.live_rows) == (2, 51)
+    assert (staged.copies, staged.uuid, staged.loads.count("part-0.gz")) == (2, UUID(int=102), 2)
 
 
 @pytest.mark.parametrize(

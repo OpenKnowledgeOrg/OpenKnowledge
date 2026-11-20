@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from uuid import UUID
 
 import httpx
@@ -7,6 +8,7 @@ import pytest
 from openknowledge_adapters import clickhouse
 from openknowledge_adapters.clickhouse.load_sql import sql_sha256
 from openknowledge_adapters.clickhouse.parquet_sql import parquet_upsert_query
+from openknowledge_adapters.clickhouse.tables import staging_table
 from openknowledge_contracts.manifests import ObjectPath, ObjectRef
 from openknowledge_contracts.tables.clickhouse import version_expression
 from openknowledge_contracts.tables.openalex import CONTRACTS as OPENALEX_CONTRACTS
@@ -20,6 +22,7 @@ from openknowledge_core.ingestion.errors import (
     TableUnavailable,
 )
 from openknowledge_core.ingestion.models import LoadObject, TableState
+from tests.clickhouse_local import MIGRATIONS, needs_clickhouse, run, section, up
 from tests.fakes.ports import PRODUCER, FakeApplied, FakeStore, clock
 
 CONFIG = clickhouse.ClickHouseConfig.model_validate(
@@ -59,7 +62,7 @@ async def test_errors_map_by_exception_code(
 
     async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
         with pytest.raises(error) as raised:
-            await ch.tables.live_rows("papers", "2026-10-06")
+            await ch.tables.table("papers")
     assert str(raised.value).startswith(message)
     assert "hunter2" not in str(raised.value)
 
@@ -152,12 +155,14 @@ async def test_openalex_loads_from_the_contracts_archived_parquet(dataset: str) 
         written = await ch.tables.load(
             LoadObject(
                 dataset=dataset,
+                into=table.into,
                 release="2026-10-14",
                 object_ref=ObjectRef(path=path, generation=1),
             )
         )
-        assert await ch.tables.live_rows(dataset, "2026-10-14") == 2
+        assert await ch.tables.live_rows(table, "2026-10-14") == 2
     assert (table.archive, table.name, written) == (contract.archived, contract.table, 2)
+    assert table.staged and table.into == table.name
     assert table.load_sql_sha256 == sql_sha256(parquet_upsert_query(contract))
     assert queries[-2] == parquet_upsert_query(contract)
     settings = "\nSETTINGS max_threads = 1, max_memory_usage = 6000000000"
@@ -174,27 +179,117 @@ async def test_openalex_loads_from_the_contracts_archived_parquet(dataset: str) 
     )
 
 
-async def test_stale_only_checks_receipts_in_the_configured_archive() -> None:
+def local_clickhouse(workdir: Path) -> httpx.MockTransport:
+    """ClickHouse's HTTP interface, answered by ``clickhouse local`` on ``workdir``."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        params = {
+            key.removeprefix("param_"): value
+            for key, value in request.url.params.items()
+            if key.startswith("param_")
+        }
+        result = run(request.content.decode(), workdir, **params)
+        assert result.returncode == 0, result.stderr
+        return httpx.Response(200, text=result.stdout)
+
+    return httpx.MockTransport(handle)
+
+
+@needs_clickhouse
+async def test_stale_checks_receipts_in_the_configured_archive_for_sql_and_uuid(
+    tmp_path: Path,
+) -> None:
     release = "2026-10-14"
     table = TableState(
         name="openalex_works",
+        into="openalex_works",
+        staged=True,
         dataset="works",
-        archive="archived-works",
+        archive="works",
         uuid=UUID(int=1),
         has_rows=True,
         load_sql_sha256="1" * 64,
         delete_sql_sha256="2" * 64,
         updates="snapshot",
     )
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        assert "AND startsWith(source_object, {archive:String})" in request.content.decode()
-        query_prefix = "gs://raw/old/openalex/2026-10-14/archived-works/"
-        assert request.url.params["param_archive"] == query_prefix
-        return httpx.Response(200, text='{"1":1}\n')
-
-    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
+    receipt = (
+        "INSERT INTO loads (target, target_uuid, source_release, source_object, load_sql_sha256) "
+        "VALUES ('openalex_works', {uuid:UUID}, {release:Date}, {path:String}, {hash:String});"
+    )
+    migration = section(MIGRATIONS / "00008_create_loads.sql", "Up")
+    result = run(
+        migration + receipt,
+        tmp_path,
+        uuid=str(table.uuid),
+        release=release,
+        path="gs://raw/old/openalex/2026-10-14/works/part.parquet",
+        hash="0" * 64,
+    )
+    assert result.returncode == 0, result.stderr
+    async with clickhouse.connect(CONFIG, transport=local_clickhouse(tmp_path)) as ch:
         assert await ch.tables.stale(table, release, prefix="old/openalex")
+        assert not await ch.tables.stale(table, release, prefix="openalex")
+        # Loaded into a staging copy under current SQL, but not swapped in.
+        result = run(
+            receipt,
+            tmp_path,
+            uuid=str(UUID(int=2)),
+            release=release,
+            path="gs://raw/openalex/2026-10-14/works/part.parquet",
+            hash=table.load_sql_sha256,
+        )
+        assert result.returncode == 0, result.stderr
+        assert await ch.tables.stale(table, release, prefix="openalex")
+
+
+@needs_clickhouse
+async def test_a_staging_copy_is_reused_only_for_its_release_and_the_live_schema(
+    tmp_path: Path,
+) -> None:
+    def sql(statement: str) -> list[str]:
+        result = run(statement, tmp_path)
+        assert result.returncode == 0, result.stderr
+        return result.stdout.split()
+
+    def insert(table: str, *works: tuple[int, str]) -> None:
+        rows = ", ".join(f"({work}, '{release}')" for work, release in works)
+        sql(f"INSERT INTO {table} (work_id, source_release) VALUES {rows}")
+
+    sql(up())
+    old, new = "2026-10-14", "2027-01-13"
+    insert("openalex_works", (1, old))
+    async with clickhouse.connect(CONFIG, transport=local_clickhouse(tmp_path)) as ch:
+        live = await ch.tables.table("works")
+        staged = await ch.tables.stage(live, new)
+        assert (staged.name, staged.into, staged.has_rows) == (
+            live.name,
+            staging_table(live.name),
+            False,
+        )
+        insert(staged.into, (2, new))
+        staged = await ch.tables.stage(live, new)
+        assert staged.has_rows
+        assert (await ch.tables.live_rows(staged, new), await ch.tables.live_rows(live, new)) == (
+            1,
+            0,
+        )
+        # Rows of another release, or a migration of the live table, start an empty copy.
+        insert(staged.into, (3, old))
+        assert not (await ch.tables.stage(live, new)).has_rows
+        insert(staged.into, (2, new))
+        sql("ALTER TABLE openalex_works ADD COLUMN extra UInt8")
+        assert not (await ch.tables.stage(live, new)).has_rows
+        assert "extra" in sql(f"SELECT name FROM system.columns WHERE table = '{staged.into}'")
+        insert(staged.into, (2, new), (4, new))
+        await ch.tables.swap(staged)
+        await ch.tables.swap(live)  # a retry only drops what is left
+    assert sql("SELECT work_id, source_release FROM openalex_works ORDER BY work_id") == [
+        "2",
+        new,
+        "4",
+        new,
+    ]
+    assert sql("SELECT name FROM system.tables WHERE name LIKE '%staging'") == []
 
 
 async def test_a_retried_parquet_duplicates_check_keeps_its_query_id() -> None:
