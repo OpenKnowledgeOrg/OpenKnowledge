@@ -90,9 +90,10 @@ class EmbeddingLocations:
         for start in range(0, len(corpusids), LOCATE_CHUNK):
             chunk = corpusids[start : start + LOCATE_CHUNK]
             ids = "[" + ",".join(str(int(corpusid)) for corpusid in chunk) + "]"
-            ahead |= {row["release"] for row in await self._client.rows(AHEAD, ids=ids, held=held)}
             for row in await self._client.rows(LOCATE, ids=ids):
                 located[row["corpusid"]] = (row["object"], row["row"])
+            # After LOCATE, so a row it read that a diff inserted meanwhile shows here too.
+            ahead |= {row["release"] for row in await self._client.rows(AHEAD, ids=ids, held=held)}
         if ahead:
             raise IndexAhead(
                 f"{TABLE} has rows of {', '.join(sorted(ahead))} past the recorded {held} for "
