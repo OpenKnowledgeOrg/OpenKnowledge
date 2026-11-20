@@ -13,6 +13,7 @@ parse it.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -36,8 +37,9 @@ _SCALARS: dict[pa.DataType, str] = {
     pa.float32(): "Float32",
     pa.float64(): "Float64",
     pa.string(): "String",
-    pa.date32(): "Date",
+    pa.date32(): "Date32",
     pa.timestamp("s"): "DateTime",
+    pa.timestamp("us", tz="UTC"): "DateTime64(6, 'UTC')",
 }
 
 
@@ -74,7 +76,12 @@ def table_columns(contract: DatasetContract) -> tuple[Column, ...]:
     renderer = _Renderer(contract)
     columns: list[Column] = []
     for field in fields_of(contract.schema):
-        columns.append(Column(field.name, renderer.render(field.type, field.nullable, field.name)))
+        column_type = (
+            "Date"
+            if field.name == "source_release"
+            else renderer.render(field.type, field.nullable, field.name)
+        )
+        columns.append(Column(field.name, column_type))
         if field.nullable and _is_composite(field.type):
             columns.append(Column(field.name + NULL_FLAG_SUFFIX, "Bool"))
     columns.append(Column(VERSION, "UInt64", materialized=version_expression(contract)))
@@ -92,6 +99,12 @@ def table_columns(contract: DatasetContract) -> tuple[Column, ...]:
 
 def _is_composite(type_: pa.DataType) -> bool:
     return isinstance(type_, pa.ListType | pa.MapType | pa.StructType)
+
+
+def _tuple_name(name: str) -> str:
+    if re.fullmatch(r"[a-zA-Z_][a-zA-Z_0-9]*", name):
+        return name
+    return "`" + name.replace("\\", "\\\\").replace("`", "\\`") + "`"
 
 
 def _nullable(name: str, nullable: bool) -> str:
@@ -119,7 +132,8 @@ class _Renderer:
             return f"Array({self._inner(item, f'{path}.{item.name}')})"
         if isinstance(type_, pa.StructType):
             items = ", ".join(
-                f"{f.name} {self._inner(f, f'{path}.{f.name}')}" for f in fields_of(type_)
+                f"{_tuple_name(f.name)} {self._inner(f, f'{path}.{f.name}')}"
+                for f in fields_of(type_)
             )
             return f"Tuple({items})"
         if isinstance(type_, pa.DictionaryType):

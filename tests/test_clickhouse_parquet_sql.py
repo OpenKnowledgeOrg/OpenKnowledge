@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -24,16 +24,47 @@ from openknowledge_adapters.clickhouse.parquet_sql import (
     broken_indexes_query,
     parquet_duplicates_parameters,
     parquet_duplicates_query,
+    parquet_removed_query,
     parquet_upsert_query,
 )
-from openknowledge_contracts.sources import all_contracts
 from openknowledge_contracts.tables import DatasetContract
 from openknowledge_contracts.tables.clickhouse import table_columns
-from openknowledge_contracts.tables.fields import fields_of
-from openknowledge_contracts.tables.openalex import OPENALEX_SOURCES, WORKS, WORKS_ABSTRACTS
+from openknowledge_contracts.tables.fields import ArrowField, fields_of
+from openknowledge_contracts.tables.openalex import (
+    CONTRACTS,
+    OPENALEX_SOURCES,
+    WORKS,
+    WORKS_ABSTRACTS,
+)
+from openknowledge_contracts.tables.openalex.fields import id_prefix
+from openknowledge_contracts.tables.openalex.work_projections import WORK_PROJECTIONS
 from tests.clickhouse_local import clickhouse_local, needs_clickhouse, run, up
 
 RELEASE = "2026-10-14"
+
+
+def archived(field: ArrowField) -> ArrowField:
+    """``field`` as OpenAlex's Parquet holds it: IDs and labels as text, everything nullable."""
+    type_ = field.type
+    if id_prefix(field) is not None or isinstance(type_, pa.DictionaryType):
+        type_ = pa.string()
+    elif isinstance(type_, pa.ListType):
+        item = cast("pa.ListType[pa.DataType]", type_).value_field
+        type_ = pa.list_(archived(item))
+    elif isinstance(type_, pa.StructType):
+        type_ = pa.struct([archived(member) for member in fields_of(type_)])
+    return pa.field(field.name, type_)
+
+
+def archive_fields(fields: list[ArrowField]) -> list[ArrowField]:
+    """The Parquet columns ``fields`` are read from, without the ``has_<struct>`` flags."""
+    flags = {f"has_{field.name}" for field in fields if isinstance(field.type, pa.StructType)}
+    return [archived(field) for field in fields if field.name not in flags]
+
+
+_WORKS_FIELDS = fields_of(WORKS.source)
+# The columns after updated_date copy the work's own record.
+_RECORD = _WORKS_FIELDS[[f.name for f in _WORKS_FIELDS].index("updated_date") + 1 :]
 
 _S, _B, _LIST = pa.string(), pa.bool_(), pa.list_(pa.string())
 _SOURCE = pa.struct(
@@ -72,6 +103,7 @@ WORKS_FILE = pa.schema(
         ("has_content", pa.struct([("pdf", _B), ("grobid_xml", _B)])),
         ("has_fulltext", _B),
         ("updated_date", pa.timestamp("us", tz="UTC")),
+        *((f.name, f.type) for f in archive_fields(_RECORD) if f.name != "ids"),
     ]
 )  # fmt: skip
 
@@ -147,19 +179,25 @@ def load_and_select(
 
 
 def test_each_parquet_projection_fills_its_contract_in_order() -> None:
-    for contract in all_contracts():
-        if contract.name in SELECTS:
-            assert list(SELECTS[contract.name]) == [f.name for f in fields_of(contract.source)]
+    for contract in CONTRACTS.values():
+        assert list(SELECTS[contract.name]) == contract.source.names
 
 
 @needs_clickhouse
 def test_a_works_file_lands_with_normalised_ids(tmp_path: Path) -> None:
     # In the archive's own folder, which must not stand in for the file's updated_date.
     name = "updated_date=2026-10-14/part_0000.parquet"
+    record = {
+        "created_date": datetime(2026, 10, 1, microsecond=123456, tzinfo=UTC),
+        "awards": [{"id": "https://openalex.org/G7", "funder_id": "https://openalex.org/F9"}],
+        "funders": [{"id": "https://openalex.org/F9", "display_name": "A funder"}],
+        "apc_paid": {"value": 9.5, "currency": "USD"},
+    }
     write_works(
         tmp_path / name,
         [
-            work(
+            record
+            | work(
                 "https://openalex.org/W2741809807",
                 doi="https://doi.org/10.1000/ABC.Def",
                 ids={
@@ -201,6 +239,9 @@ def test_a_works_file_lands_with_normalised_ids(tmp_path: Path) -> None:
             "has_grobid_xml": False,
             "has_abstract": True,
             "is_retracted": True,
+            "created_date": "2026-10-01 00:00:00.123456",
+            "has_apc_paid": True,
+            "has_apc_list": False,
             "source_release": RELEASE,
             "removed": False,
         }.items()
@@ -220,6 +261,12 @@ def test_a_works_file_lands_with_normalised_ids(tmp_path: Path) -> None:
         }.items()
     )
     assert [rows[k]["doi_norm"] for k in ("6", "7", "8")] == ["10.5555/x", "10.1/y", None]
+    assert rows["2741809807"]["ids"]["pmid"] == "https://pubmed.ncbi.nlm.nih.gov/12345678"
+    assert rows["2741809807"]["awards"][0] | {"display_name": None} == {
+        "id": 7, "display_name": None, "funder_award_id": None, "funder_id": 9,
+        "funder_display_name": None,
+    }  # fmt: skip
+    assert rows["2741809807"]["funders"][0]["id"] == 9 and rows["5"]["funders"] == []
 
 
 @needs_clickhouse
@@ -423,3 +470,146 @@ def test_a_sources_file_lands_with_parsed_ids_and_refuses_a_work_id(tmp_path: Pa
     result = run(sql, tmp_path / "db", **params(tmp_path / "bad.parquet"))
     assert result.returncode != 0
     assert "openalex_sources: id breaks the contract" in result.stderr
+
+
+def entity_fields(contract: DatasetContract) -> list[ArrowField]:
+    """The Parquet columns of ``contract``, with its key as OpenAlex's URL ``id``."""
+    fields = archive_fields(fields_of(contract.source))
+    return [pa.field("id", pa.string()) if f.name in contract.key else f for f in fields]
+
+
+@needs_clickhouse
+def test_nested_work_projections_round_trip(tmp_path: Path) -> None:
+    schema = pa.schema(
+        {
+            field.name: field for contract in WORK_PROJECTIONS for field in entity_fields(contract)
+        }.values()
+    )
+    rows = [
+        {
+            "id": "https://openalex.org/W1",
+            "authorships": [
+                {
+                    "author": {"id": "https://openalex.org/A4"},
+                    "author_position": "first",
+                    "affiliations": [{"institution_ids": ["https://openalex.org/I5"]}],
+                    "institutions": [{"id": "https://openalex.org/I5"}],
+                }
+            ],
+            "corresponding_author_ids": ["https://openalex.org/A4"],
+            "locations": [FULL_LOCATION],
+            "primary_location": FULL_LOCATION,
+            "referenced_works": ["https://openalex.org/W12345678901", None],
+            "related_works": ["https://openalex.org/W2"],
+            "topics": [{"id": "https://openalex.org/T3", "subfield": {"id": "subfields/1702"}}],
+            "concepts": [{"id": "https://openalex.org/C41008148"}],
+        },
+        {"id": "https://openalex.org/W2"},
+    ]
+    path = tmp_path / "works.parquet"
+    pq.write_table(pa.Table.from_pylist(rows, schema=schema), path)  # pyright: ignore[reportUnknownMemberType]
+    queries = [
+        f"{parquet_upsert_query(contract, 'file')}; "
+        f"SELECT * FROM {contract.table} ORDER BY work_id FORMAT JSONEachRow;"
+        for contract in WORK_PROJECTIONS
+    ]
+    stored = clickhouse_local(up() + "\n".join(queries), tmp_path / "db", **params(path))
+    assert [row["work_id"] for row in stored] == [1, 2] * 4
+    author, no_author, location, no_location, refs, no_refs, topics, _ = stored
+    (authorship,) = author["authorships"]
+    assert authorship["author"]["id"] == 4 and authorship["author_position"] == "first"
+    assert authorship["affiliations"][0]["institution_ids"] == [5]
+    assert authorship["institutions"] == [{"id": 5}]
+    assert author["corresponding_author_ids"] == [4]
+    assert no_author["authorships"] == []
+    assert location["locations"][0]["source"] == {"id": 123}
+    assert location["has_primary_location"] is True
+    assert no_location["has_primary_location"] is False
+    assert no_location["primary_location"]["pdf_url"] is None
+    assert no_location["locations"] == []
+    # A null ID in a list keeps its place.
+    assert refs["referenced_works"] == [12345678901, None] and refs["related_works"] == [2]
+    assert no_refs["referenced_works"] == []
+    assert topics["topics"][0]["id"] == 3
+    assert topics["topics"][0]["subfield"]["id"] == "subfields/1702"
+    assert topics["concepts"][0]["id"] == 41008148
+
+    locations = CONTRACTS["works-locations"]
+    assert clickhouse_local(
+        f"{parquet_removed_query(locations)}; "
+        "SELECT countIf(removed) AS removed FROM openalex_work_locations FINAL FORMAT JSONEachRow;",
+        tmp_path / "db",
+        source_release="2027-01-13",
+    ) == [{"removed": 2}]
+
+    duplicates = parquet_duplicates_query(locations, "file") + "\nFORMAT JSONEachRow"
+    repeated = [rows[0], *rows, {**rows[1], "locations_count": 9}]
+    pq.write_table(pa.Table.from_pylist(repeated, schema=schema), path)  # pyright: ignore[reportUnknownMemberType]
+    assert clickhouse_local(duplicates, tmp_path / "db", source_files=str(path)) == [
+        {"identical_rows": 1, "conflicting_keys": 1, "examples": ["(2)"]}
+    ]
+
+    # An ID of another entity fails the load instead of parsing.
+    for dataset, column, bad in (
+        ("works-references", "related_works", ["https://openalex.org/S2"]),
+        ("works-authorships", "authorships", [{"author": {"id": "https://openalex.org/I4"}}]),
+        ("works-locations", "locations", [{"source": {"id": "https://openalex.org/S1x"}}]),
+    ):
+        table = pa.Table.from_pylist([{**rows[0], column: bad}], schema=schema)
+        pq.write_table(table, path)  # pyright: ignore[reportUnknownMemberType]
+        rejected = run(
+            parquet_upsert_query(CONTRACTS[dataset], "file"), tmp_path / "db", **params(path)
+        )
+        assert rejected.returncode != 0
+        assert f"{CONTRACTS[dataset].table}: {column} breaks the contract" in rejected.stderr
+
+
+@needs_clickhouse
+def test_full_entities_round_trip_numeric_and_string_keys(tmp_path: Path) -> None:
+    database = tmp_path / "db"
+    clickhouse_local(up(), database)
+    for name, row, projection, expected in (
+        (
+            "institutions",
+            {
+                "id": "https://openalex.org/I42",
+                "associated_institutions": [
+                    {"id": "https://openalex.org/I71", "relationship": "related"},
+                ],
+            },
+            "institution_id AS key, associated_institutions[1].id AS related",
+            {"key": 42, "related": "https://openalex.org/I71"},
+        ),
+        (
+            "sources-full",
+            {
+                "id": "https://openalex.org/S137773608",
+                "ids": {"mag": "137773608"},
+                "apc_usd_by_year": [{"year": 2025, "price": 1250}],
+                "updated_date": datetime(2026, 10, 1, microsecond=123456, tzinfo=UTC),
+            },
+            "source_id AS key, ids.mag AS mag, apc_usd_by_year[1].price AS price, updated_date",
+            {
+                "key": 137773608,
+                "mag": "137773608",
+                "price": 1250,
+                "updated_date": "2026-10-01 00:00:00.123456",
+            },
+        ),
+        (
+            "countries",
+            {"id": "https://openalex.org/countries/US", "display_name": "United States"},
+            "id AS key, display_name",
+            {"key": "https://openalex.org/countries/US", "display_name": "United States"},
+        ),
+    ):
+        contract = CONTRACTS[name]
+        path = tmp_path / f"{contract.archived}.parquet"
+        table = pa.Table.from_pylist([row], schema=pa.schema(entity_fields(contract)))
+        pq.write_table(table, path)  # pyright: ignore[reportUnknownMemberType]
+        assert clickhouse_local(
+            f"{parquet_upsert_query(contract, 'file')}; "
+            f"SELECT {projection} FROM {contract.table} FORMAT JSONEachRow;",
+            database,
+            **params(path),
+        ) == [expected]

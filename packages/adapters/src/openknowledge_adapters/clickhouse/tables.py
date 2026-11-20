@@ -12,7 +12,6 @@ from openknowledge_adapters.clickhouse.load_sql import (
     duplicates_parameters,
     duplicates_query,
     query_parameters,
-    removed_query,
     sql_sha256,
     upsert_query,
 )
@@ -20,7 +19,9 @@ from openknowledge_adapters.clickhouse.parquet_sql import (
     broken_indexes_query,
     parquet_duplicates_parameters,
     parquet_duplicates_query,
+    parquet_removed_query,
     parquet_upsert_query,
+    wide_read_settings,
 )
 from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.manifests import ObjectPath
@@ -91,6 +92,24 @@ class ClickHouseTables:
         )
         return LoadRecord.model_validate(rows[0]) if rows else None
 
+    async def stale(self, table: TableState, release: ReleaseId, *, prefix: str) -> bool:
+        """Whether an object in the configured release archive was loaded under outdated SQL."""
+        archive = ObjectPath.under(self._raw_bucket, prefix.strip("/"), release, table.archive)
+        rows = await self._client.rows(
+            "SELECT 1 FROM loads FINAL WHERE target = {target:String} "
+            "AND target_uuid = {uuid:UUID} AND source_release = {release:Date} "
+            "AND startsWith(source_object, {archive:String}) "
+            "AND load_sql_sha256 != if(operation = 'delete', {delete:String}, {upsert:String}) "
+            "LIMIT 1",
+            target=table.name,
+            uuid=str(table.uuid),
+            release=release,
+            archive=f"{archive}/",
+            delete=table.delete_sql_sha256,
+            upsert=table.load_sql_sha256,
+        )
+        return bool(rows)
+
     async def load(self, request: LoadObject) -> int:
         contract = _contract(request.dataset)
         path = self._readable(request.object_ref.path)
@@ -118,7 +137,9 @@ class ClickHouseTables:
         )
         if contract.updates == "snapshot":
             query += f" AND NOT {REMOVED}"
-        rows = await self._client.rows(query, table=contract.table, release=release)
+        rows = await self._client.rows(
+            query + wide_read_settings(contract), table=contract.table, release=release
+        )
         return int(rows[0]["rows"])
 
     async def broken_indexes(self, dataset: DatasetName, release: ReleaseId) -> int:
@@ -146,7 +167,9 @@ class ClickHouseTables:
         return Duplicates.model_validate(rows[0])
 
     async def mark_removed(self, dataset: DatasetName, release: ReleaseId) -> int:
-        return await self._client.written(removed_query(_contract(dataset)), source_release=release)
+        return await self._client.written(
+            parquet_removed_query(_contract(dataset)), source_release=release
+        )
 
     def _readable(self, path: ObjectPath) -> ObjectPath:
         if path.bucket != self._raw_bucket:

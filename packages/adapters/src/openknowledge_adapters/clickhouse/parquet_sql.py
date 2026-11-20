@@ -15,6 +15,9 @@ from __future__ import annotations
 import posixpath
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
+from typing import cast
+
+import pyarrow as pa
 
 from openknowledge_adapters.clickhouse.load_sql import (
     EXAMPLES,
@@ -23,10 +26,15 @@ from openknowledge_adapters.clickhouse.load_sql import (
     identifier,
     literal,
     provenance,
+    removed_query,
 )
 from openknowledge_contracts.datasets import DatasetName
 from openknowledge_contracts.tables import DatasetContract
-from openknowledge_contracts.tables.fields import fields_of
+from openknowledge_contracts.tables.clickhouse import table_columns
+from openknowledge_contracts.tables.fields import ArrowField, fields_of
+from openknowledge_contracts.tables.openalex import CONTRACTS, WORKS
+from openknowledge_contracts.tables.openalex.entities import ID_PREFIXES
+from openknowledge_contracts.tables.openalex.fields import id_prefix
 
 _NO_HIVE = "use_hive_partitioning = 0"
 BROKEN_INDEX = "index_broken"
@@ -46,6 +54,110 @@ def strip_doi(column: str) -> str:
 
 def _ids(name: str) -> str:
     return f"toUInt64OrNull(extract(ifNull(ids['{name}'], ''), '(\\\\d+)/?$'))"
+
+
+def _id_pattern(prefix: str, expression: str) -> str:
+    pattern = literal("^https://openalex[.]org/" + prefix + "[1-9][0-9]{0,18}$")
+    return f"ifNull(match({expression}, {pattern}), 0)"
+
+
+def _item(field: ArrowField) -> ArrowField | None:
+    """The item of a list field; ``None`` for any other field."""
+    type_ = field.type
+    if isinstance(type_, pa.ListType):
+        return cast("pa.ListType[pa.DataType]", type_).value_field
+    return None
+
+
+def _members(field: ArrowField) -> list[ArrowField]:
+    type_ = field.type
+    return fields_of(type_) if isinstance(type_, pa.StructType) else []
+
+
+def _holds_ids(field: ArrowField) -> bool:
+    item = _item(field)
+    return (
+        id_prefix(field) is not None
+        or (item is not None and _holds_ids(item))
+        or any(_holds_ids(member) for member in _members(field))
+    )
+
+
+def _stored(value: str, field: ArrowField, depth: int = 0) -> str:
+    """``value`` as ``field`` stores it: OpenAlex IDs parsed, struct members it lacks dropped.
+
+    A part without IDs is passed through whole. The check from ``_valid`` runs first, so a
+    parse here never meets a malformed ID.
+    """
+    if id_prefix(field) is not None:
+        if field.nullable:
+            return f"toUInt64OrNull(substring({value}, 23))"
+        return f"toUInt64OrZero(substring(assumeNotNull({value}), 23))"
+    if not _holds_ids(field):
+        return value
+    if (item := _item(field)) is not None:
+        name = f"x{depth}"
+        return f"arrayMap({name} -> {_stored(name, item, depth + 1)}, {value})"
+    members = (
+        _stored(f"tupleElement({value}, {literal(member.name)})", member, depth)
+        for member in _members(field)
+    )
+    return f"tuple({', '.join(members)})"
+
+
+def _valid(value: str, field: ArrowField, depth: int = 0) -> str:
+    """Whether every OpenAlex ID in ``value`` is a URL of its entity; null only where allowed."""
+    prefix = id_prefix(field)
+    if prefix is not None:
+        valid = _id_pattern(prefix, value)
+        return f"(isNull({value}) OR {valid})" if field.nullable else valid
+    if (item := _item(field)) is not None:
+        name = f"x{depth}"
+        return f"arrayAll({name} -> {_valid(name, item, depth + 1)}, {value})"
+    return " AND ".join(
+        _valid(f"tupleElement({value}, {literal(member.name)})", member, depth)
+        for member in _members(field)
+        if _holds_ids(member)
+    )
+
+
+def _record_selects(contract: DatasetContract, fields: list[ArrowField]) -> dict[str, str]:
+    """``fields`` of ``contract`` read from the Parquet columns of the same names.
+
+    A ``has_<struct>`` flag says whether the struct was not null.
+    """
+    types = {column.name: column.type for column in table_columns(contract)}
+    structs = {field.name for field in fields if isinstance(field.type, pa.StructType)}
+    selects: dict[str, str] = {}
+    for field in fields:
+        value = identifier(field.name)
+        if field.name.startswith("has_") and field.name[4:] in structs:
+            value = identifier(field.name[4:])
+            selects[field.name] = (
+                f"NOT isNotDistinctFrom({value}, defaultValueOfArgumentType({value}))"
+            )
+        elif _holds_ids(field):
+            selects[field.name] = f"CAST({_stored(value, field)}, {literal(types[field.name])})"
+        else:
+            selects[field.name] = value
+    return selects
+
+
+def _record_checks(contract: DatasetContract, fields: list[ArrowField]) -> tuple[Check, ...]:
+    return tuple(
+        (
+            _valid(identifier(field.name), field),
+            f"{contract.table}: {field.name} breaks the contract",
+        )
+        for field in fields
+        if _holds_ids(field)
+    )
+
+
+# The columns of a work's own record beyond its scalar metadata, which end the works contract.
+_WORK_RECORD = fields_of(WORKS.source)[
+    [field.name for field in fields_of(WORKS.source)].index("updated_date") + 1 :
+]
 
 
 _WORKS: dict[str, str] = {
@@ -101,9 +213,9 @@ _IS_INDEX = (
     "JSONExtractArrayRaw(tupleElement(kv, 2))), JSONExtractKeysAndValuesRaw(index_json)))"
 )
 
-SELECTS: Mapping[DatasetName, Mapping[str, str]] = MappingProxyType(
+_PROJECTED: Mapping[DatasetName, Mapping[str, str]] = MappingProxyType(
     {
-        "works": MappingProxyType(_WORKS),
+        "works": MappingProxyType(_WORKS | _record_selects(WORKS, _WORK_RECORD)),
         "works-abstracts": MappingProxyType(
             {
                 "work_id": _WORK_ID,
@@ -145,7 +257,7 @@ _WITH: Mapping[DatasetName, tuple[tuple[str, str], ...]] = MappingProxyType(
     }
 )
 
-CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
+_PROJECTED_CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
     {
         "works": (
             (_IS_WORK, "openalex_works: id breaks the contract"),
@@ -153,6 +265,7 @@ CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
                 (f"{name} IS NOT NULL", f"openalex_works: {name} breaks the contract")
                 for name in ("is_xpac", "is_paratext", "updated_date")
             ),
+            *_record_checks(WORKS, _WORK_RECORD),
         ),
         "works-abstracts": ((_IS_WORK, "openalex_abstracts: id breaks the contract"),),
         "sources": (
@@ -161,6 +274,70 @@ CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
         ),
     }
 )
+
+
+_FULL_RECORDS = tuple(contract for name, contract in CONTRACTS.items() if name not in _PROJECTED)
+
+# Bound both the reader's prefetch and the blocks buffered for sorting and insertion.
+_WIDE_READ_SETTINGS = "max_threads = 1, max_memory_usage = 6000000000"
+_WIDE_SETTINGS = (
+    f"{_WIDE_READ_SETTINGS}, max_download_threads = 1, "
+    "input_format_parquet_max_block_size = 8192, "
+    "input_format_parquet_prefer_block_bytes = 8388608, "
+    "input_format_parquet_memory_high_watermark = 268435456"
+)
+# Blocks, and so parts, close at 256 MB of data, whatever the row count; a wide table's insert
+# peaks near 2.3 GB with them.
+_WIDE_INSERT_SETTINGS = (
+    "max_insert_threads = 1, min_insert_block_size_rows = 0, "
+    "min_insert_block_size_bytes = 268435456"
+)
+
+
+def _wide(contract: DatasetContract) -> bool:
+    if contract.name == "works":
+        return True
+    return contract in _FULL_RECORDS and contract.archived in {"works", "authors", "awards"}
+
+
+def wide_read_settings(contract: DatasetContract) -> str:
+    """Return a trailing SETTINGS clause for reads of wide contracts."""
+    return f"\nSETTINGS {_WIDE_READ_SETTINGS}" if _wide(contract) else ""
+
+
+def _full_projection(contract: DatasetContract) -> dict[str, str]:
+    selects = _record_selects(contract, fields_of(contract.source))
+    if contract.key != ("id",):
+        selects[contract.key[0]] = _WORK_ID
+    return selects
+
+
+def _full_checks(contract: DatasetContract) -> tuple[Check, ...]:
+    prefix = "W" if contract.archived == "works" else ID_PREFIXES.get(contract.archived)
+    key = _id_pattern(prefix, "id") if prefix else "notEmpty(ifNull(id, ''))"
+    return (
+        (key, f"{contract.table}: id breaks the contract"),
+        *_record_checks(contract, fields_of(contract.source)),
+    )
+
+
+SELECTS: Mapping[DatasetName, Mapping[str, str]] = MappingProxyType(
+    dict(_PROJECTED) | {c.name: MappingProxyType(_full_projection(c)) for c in _FULL_RECORDS}
+)
+CHECKS: Mapping[DatasetName, tuple[Check, ...]] = MappingProxyType(
+    dict(_PROJECTED_CHECKS) | {c.name: _full_checks(c) for c in _FULL_RECORDS}
+)
+
+
+def _no_subcolumns(contract: DatasetContract) -> str:
+    """Read whole structs where IDs are parsed out of them.
+
+    ClickHouse 26.8 otherwise reads a struct member as a Parquet subcolumn beside the whole
+    struct and fails with NOT_FOUND_COLUMN_IN_BLOCK.
+    """
+    if any(_holds_ids(field) for field in fields_of(contract.source)):
+        return ", optimize_functions_to_subcolumns = 0"
+    return ""
 
 
 def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> str:
@@ -176,14 +353,24 @@ def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> st
         f"NOT throwIf(NOT ({condition}), {literal(message)})"
         for condition, message in CHECKS[contract.name]
     )
+    settings = f"insert_null_as_default = 0, {_NO_HIVE}{_no_subcolumns(contract)}"
+    if _wide(contract):
+        settings += f", {_WIDE_SETTINGS}, {_WIDE_INSERT_SETTINGS}"
     return (
         f"INSERT INTO {identifier(contract.table)} ({columns})\n"
-        f"SETTINGS insert_null_as_default = 0, {_NO_HIVE}\n"
+        f"SETTINGS {settings}\n"
         f"{_with(contract.name)}"
         f"SELECT\n    {selected}\n"
         f"FROM {_source(source)}\n"
         f"WHERE {where}"
     )
+
+
+def parquet_removed_query(contract: DatasetContract) -> str:
+    query = removed_query(contract)
+    if _wide(contract):
+        return f"{query}\nSETTINGS {_WIDE_READ_SETTINGS}, {_WIDE_INSERT_SETTINGS}"
+    return query
 
 
 def broken_indexes_query(contract: DatasetContract) -> str | None:
@@ -193,6 +380,7 @@ def broken_indexes_query(contract: DatasetContract) -> str | None:
     return (
         f"SELECT countIf({BROKEN_INDEX}) AS rows FROM {identifier(contract.table)} FINAL "
         "WHERE source_release = {release:Date} AND NOT removed"
+        f"{wide_read_settings(contract)}"
     )
 
 
@@ -225,7 +413,8 @@ def parquet_duplicates_query(contract: DatasetContract, source: Source = "s3") -
         f"    groupArrayIf({EXAMPLES})(toString(record_key), conflicting) AS examples\n"
         f"FROM (\n{keys}\n)\n"
         f"SETTINGS {_NO_HIVE}, max_bytes_ratio_before_external_group_by = 0.5, "
-        "replace_running_query = 1"
+        f"replace_running_query = 1{_no_subcolumns(contract)}"
+        + (f", {_WIDE_SETTINGS}" if _wide(contract) else "")
     )
 
 

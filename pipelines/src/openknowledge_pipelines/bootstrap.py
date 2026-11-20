@@ -368,15 +368,34 @@ async def open_read_tables(
 @asynccontextmanager
 async def open_held_releases(
     settings: LoadSettings,
-) -> AsyncGenerator[Callable[[DatasetName], Awaitable[ReleaseId | None]], None]:
-    """The release each dataset's table holds: applied to its live table, which has rows."""
+    *,
+    prefix: str,
+) -> AsyncGenerator[
+    tuple[
+        Callable[[DatasetName], Awaitable[ReleaseId | None]],
+        Callable[[ReleaseId], Awaitable[bool]],
+    ],
+    None,
+]:
+    """The release each dataset's table holds, and whether OpenAlex built the read tables.
+
+    A table holds the release applied to its live table, which has rows, and only while every
+    object of it was loaded under the SQL the table loads with now. ``built`` says whether the
+    OpenAlex read tables were built from a release.
+    """
     async with clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch:
 
         async def held(dataset: DatasetName) -> ReleaseId | None:
             table = await ch.tables.table(dataset)
-            return held_release(table, await ch.applied.latest(table.name))
+            release = held_release(table, await ch.applied.latest(table.name))
+            if release is None or await ch.tables.stale(table, release, prefix=prefix):
+                return None
+            return release
 
-        yield held
+        async def built(release: ReleaseId) -> bool:
+            return await ch.read_tables.built_from("openalex", release)
+
+        yield held, built
 
 
 async def _index_search_part(settings: SearchSettings, command: IndexPapers) -> IndexPapersResult:

@@ -9,7 +9,7 @@ from openknowledge_adapters.clickhouse.load_sql import sql_sha256
 from openknowledge_adapters.clickhouse.parquet_sql import parquet_upsert_query
 from openknowledge_contracts.manifests import ObjectPath, ObjectRef
 from openknowledge_contracts.tables.clickhouse import version_expression
-from openknowledge_contracts.tables.openalex import WORKS_ABSTRACTS
+from openknowledge_contracts.tables.openalex import CONTRACTS as OPENALEX_CONTRACTS
 from openknowledge_contracts.tables.s2 import CITATIONS
 from openknowledge_core.ingestion import LoadDataset, LoadDatasetService
 from openknowledge_core.ingestion.errors import (
@@ -19,7 +19,7 @@ from openknowledge_core.ingestion.errors import (
     TableRejected,
     TableUnavailable,
 )
-from openknowledge_core.ingestion.models import LoadObject
+from openknowledge_core.ingestion.models import LoadObject, TableState
 from tests.fakes.ports import PRODUCER, FakeApplied, FakeStore, clock
 
 CONFIG = clickhouse.ClickHouseConfig.model_validate(
@@ -129,7 +129,9 @@ async def test_applied_took_and_rebased_match_target_uuid_and_releases(found: bo
         assert await ch.applied.rebased("papers", target_uuid, "2026-10-06", "2026-10-13") is found
 
 
-async def test_abstracts_load_from_the_archived_works_parquet() -> None:
+@pytest.mark.parametrize("dataset", ["works-abstracts", "openalex-authors"])
+async def test_openalex_loads_from_the_contracts_archived_parquet(dataset: str) -> None:
+    contract = OPENALEX_CONTRACTS[dataset]
     queries: list[str] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -137,23 +139,62 @@ async def test_abstracts_load_from_the_archived_works_parquet() -> None:
         if "system.tables" in queries[-1]:
             row = {"uuid": "00000000-0000-0000-0000-000000000001", "total_rows": 0}
             return httpx.Response(200, text=json.dumps(row))
+        if queries[-1].startswith("SELECT count()"):
+            return httpx.Response(200, text='{"rows":2}')
         return httpx.Response(200, headers={"X-ClickHouse-Summary": '{"written_rows": "2"}'})
 
     path = ObjectPath(
-        bucket="raw", name="openalex/2026-10-14/works/updated_date=2026-10-14/part_0000.parquet"
+        bucket="raw",
+        name=f"openalex/2026-10-14/{contract.archived}/updated_date=2026-10-14/part_0000.parquet",
     )
     async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
-        table = await ch.tables.table("works-abstracts")
+        table = await ch.tables.table(dataset)
         written = await ch.tables.load(
             LoadObject(
-                dataset="works-abstracts",
+                dataset=dataset,
                 release="2026-10-14",
                 object_ref=ObjectRef(path=path, generation=1),
             )
         )
-    assert (table.archive, table.name, written) == ("works", "openalex_abstracts", 2)
-    assert table.load_sql_sha256 == sql_sha256(parquet_upsert_query(WORKS_ABSTRACTS))
-    assert queries[-1] == parquet_upsert_query(WORKS_ABSTRACTS)
+        assert await ch.tables.live_rows(dataset, "2026-10-14") == 2
+    assert (table.archive, table.name, written) == (contract.archived, contract.table, 2)
+    assert table.load_sql_sha256 == sql_sha256(parquet_upsert_query(contract))
+    assert queries[-2] == parquet_upsert_query(contract)
+    settings = "\nSETTINGS max_threads = 1, max_memory_usage = 6000000000"
+    assert ("max_memory_usage = 6000000000" in queries[-2]) == (dataset == "openalex-authors")
+    # A wide table's parts close at 256 MB of data, not at a row count.
+    byte_blocks = "min_insert_block_size_rows = 0, min_insert_block_size_bytes = 268435456"
+    assert (byte_blocks in queries[-2]) == (dataset == "openalex-authors")
+    assert "max_insert_block_size_rows" not in queries[-2]
+    suffix = settings if dataset == "openalex-authors" else ""
+    assert queries[-1] == (
+        "SELECT count() AS rows FROM {table:Identifier} FINAL "
+        "WHERE source_release = {release:Date} AND NOT removed"
+        f"{suffix} FORMAT JSONEachRow"
+    )
+
+
+async def test_stale_only_checks_receipts_in_the_configured_archive() -> None:
+    release = "2026-10-14"
+    table = TableState(
+        name="openalex_works",
+        dataset="works",
+        archive="archived-works",
+        uuid=UUID(int=1),
+        has_rows=True,
+        load_sql_sha256="1" * 64,
+        delete_sql_sha256="2" * 64,
+        updates="snapshot",
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert "AND startsWith(source_object, {archive:String})" in request.content.decode()
+        query_prefix = "gs://raw/old/openalex/2026-10-14/archived-works/"
+        assert request.url.params["param_archive"] == query_prefix
+        return httpx.Response(200, text='{"1":1}\n')
+
+    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
+        assert await ch.tables.stale(table, release, prefix="old/openalex")
 
 
 async def test_a_retried_parquet_duplicates_check_keeps_its_query_id() -> None:
