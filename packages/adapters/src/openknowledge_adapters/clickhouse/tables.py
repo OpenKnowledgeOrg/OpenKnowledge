@@ -92,19 +92,19 @@ class ClickHouseTables:
         )
         return LoadRecord.model_validate(rows[0]) if rows else None
 
-    async def stale(self, table: TableState, release: ReleaseId) -> bool:
-        """Whether an object of ``release`` went into ``table`` under SQL it no longer loads with.
-
-        A load of the release loads that object again.
-        """
+    async def stale(self, table: TableState, release: ReleaseId, *, prefix: str) -> bool:
+        """Whether an object in the configured release archive was loaded under outdated SQL."""
+        archive = ObjectPath.under(self._raw_bucket, prefix.strip("/"), release, table.archive)
         rows = await self._client.rows(
             "SELECT 1 FROM loads FINAL WHERE target = {target:String} "
             "AND target_uuid = {uuid:UUID} AND source_release = {release:Date} "
+            "AND startsWith(source_object, {archive:String}) "
             "AND load_sql_sha256 != if(operation = 'delete', {delete:String}, {upsert:String}) "
             "LIMIT 1",
             target=table.name,
             uuid=str(table.uuid),
             release=release,
+            archive=f"{archive}/",
             delete=table.delete_sql_sha256,
             upsert=table.load_sql_sha256,
         )

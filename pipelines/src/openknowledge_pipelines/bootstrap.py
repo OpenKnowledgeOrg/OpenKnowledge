@@ -368,6 +368,8 @@ async def open_read_tables(
 @asynccontextmanager
 async def open_held_releases(
     settings: LoadSettings,
+    *,
+    prefix: str,
 ) -> AsyncGenerator[
     tuple[
         Callable[[DatasetName], Awaitable[ReleaseId | None]],
@@ -386,7 +388,7 @@ async def open_held_releases(
         async def held(dataset: DatasetName) -> ReleaseId | None:
             table = await ch.tables.table(dataset)
             release = held_release(table, await ch.applied.latest(table.name))
-            if release is None or await ch.tables.stale(table, release):
+            if release is None or await ch.tables.stale(table, release, prefix=prefix):
                 return None
             return release
 

@@ -234,12 +234,14 @@ async def openalex_load(
             flows.dataset.fn,
             command,
             lambda: read_tables.build(bootstrap.producer(settings), lambda: datetime.now(UTC)),
-            partial(_release_state, settings) if recheck else None,
+            partial(_release_state, settings, prefix=command.prefix) if recheck else None,
         )
 
 
-async def _release_state(settings: LoadSettings, release: ReleaseId) -> ReleaseState:
-    async with bootstrap.open_held_releases(settings) as (held, built):
+async def _release_state(
+    settings: LoadSettings, release: ReleaseId, *, prefix: str
+) -> ReleaseState:
+    async with bootstrap.open_held_releases(settings, prefix=prefix) as (held, built):
         behind = [name for name in SOURCES["openalex"].contracts if await held(name) != release]
         return ReleaseState(behind=tuple(behind), built=await built(release))
 
@@ -257,7 +259,7 @@ async def openalex_release_check(prefix: str = "openalex") -> OpenAlexLoadResult
 
     async def state(release: ReleaseId) -> ReleaseState:
         async with admission.execution():
-            return await _release_state(load_settings, release)
+            return await _release_state(load_settings, release, prefix=prefix)
 
     async def take(release: ReleaseId) -> OpenAlexLoadResult:
         async with admission.execution(), bootstrap.open_openalex_service(settings) as service:

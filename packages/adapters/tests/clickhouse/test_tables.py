@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from uuid import UUID
 
 import httpx
@@ -19,7 +20,8 @@ from openknowledge_core.ingestion.errors import (
     TableRejected,
     TableUnavailable,
 )
-from openknowledge_core.ingestion.models import LoadObject
+from openknowledge_core.ingestion.models import LoadObject, TableState
+from tests.clickhouse_local import MIGRATIONS, needs_clickhouse, run, section
 from tests.fakes.ports import PRODUCER, FakeApplied, FakeStore, clock
 
 CONFIG = clickhouse.ClickHouseConfig.model_validate(
@@ -172,6 +174,47 @@ async def test_openalex_loads_from_the_contracts_archived_parquet(dataset: str) 
         "WHERE source_release = {release:Date} AND NOT removed"
         f"{suffix} FORMAT JSONEachRow"
     )
+
+
+@needs_clickhouse
+async def test_stale_only_checks_receipts_in_the_configured_archive(tmp_path: Path) -> None:
+    release = "2026-10-14"
+    table = TableState(
+        name="openalex_works",
+        dataset="works",
+        archive="works",
+        uuid=UUID(int=1),
+        has_rows=True,
+        load_sql_sha256="1" * 64,
+        delete_sql_sha256="2" * 64,
+        updates="snapshot",
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        params = {
+            key.removeprefix("param_"): value
+            for key, value in request.url.params.items()
+            if key.startswith("param_")
+        }
+        result = run(request.content.decode(), tmp_path, **params)
+        assert result.returncode == 0, result.stderr
+        return httpx.Response(200, text=result.stdout)
+
+    migration = section(MIGRATIONS / "00008_create_loads.sql", "Up")
+    result = run(
+        migration + "INSERT INTO loads "
+        "(target, target_uuid, source_release, source_object, load_sql_sha256) "
+        "VALUES ('openalex_works', {uuid:UUID}, {release:Date}, "
+        "'gs://raw/old/openalex/2026-10-14/works/part.parquet', {old_hash:String});",
+        tmp_path,
+        uuid=str(table.uuid),
+        release=release,
+        old_hash="0" * 64,
+    )
+    assert result.returncode == 0, result.stderr
+    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
+        assert await ch.tables.stale(table, release, prefix="old/openalex")
+        assert not await ch.tables.stale(table, release, prefix="openalex")
 
 
 async def test_a_retried_parquet_duplicates_check_keeps_its_query_id() -> None:
