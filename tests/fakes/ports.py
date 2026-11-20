@@ -351,7 +351,11 @@ class FakeStore:
 
 
 class FakeTables:
-    """ClickHouse as the loader sees it, counting rows per object."""
+    """ClickHouse as the loader sees it, counting rows per object.
+
+    A ``staged`` table loads into a staging copy, which holds ``staging_rows`` of
+    ``staging_release`` under ``staging_uuid`` until it is swapped in.
+    """
 
     def __init__(self, store: FakeStore, archive: dict[str, str] | None = None) -> None:
         self.store = store
@@ -372,10 +376,18 @@ class FakeTables:
         self.broken = 0
         self.marked: list[str] = []
         self.keys: set[str] = set()
+        self.staged = False
+        self.staging_uuid: UUID | None = None
+        self.staging_release: str | None = None
+        self.staging_rows: dict[str, int] = {}
+        self.copies = 0
+        self.swaps = 0
 
     async def table(self, dataset: str) -> TableState:
         return TableState(
             name=dataset,
+            into=dataset,
+            staged=self.staged,
             dataset=dataset,
             archive=self.archive.get(dataset, dataset),
             uuid=self.uuid,
@@ -384,6 +396,42 @@ class FakeTables:
             delete_sql_sha256="1" * 64,
             updates=self.updates,
         )
+
+    async def receipts(
+        self, table: TableState, release: str, *, prefix: str
+    ) -> dict[str, LoadRecord]:
+        return {
+            record.source_object: record
+            for record in self.records.values()
+            if record.target == table.name and record.source_release == release
+        }
+
+    async def stage(self, table: TableState, release: str) -> TableState:
+        if self.staging_uuid is None or self.staging_release != release:
+            self.copies += 1
+            self.staging_uuid = UUID(int=100 + self.copies)
+            self.staging_release, self.staging_rows = release, {}
+        return table.model_copy(
+            update={
+                "into": f"{table.name}_staging",
+                "uuid": self.staging_uuid,
+                "has_rows": bool(self.staging_rows),
+            }
+        )
+
+    async def swap(self, table: TableState) -> None:
+        if table.into != table.name:
+            assert self.staging_uuid == table.uuid
+            self.uuid, self.rows = table.uuid, self.staging_rows
+        self.swaps += 1
+        self.staging_uuid, self.staging_release, self.staging_rows = None, None, {}
+
+    async def drop_leftover(self, table: TableState, held: str) -> None:
+        if self.staging_release is None or self.staging_release <= held:
+            self.staging_uuid, self.staging_release, self.staging_rows = None, None, {}
+
+    def _into(self, table: str) -> dict[str, int]:
+        return self.staging_rows if table.endswith("_staging") else self.rows
 
     async def loaded(self, dataset: str, source_object: ObjectPath) -> LoadRecord | None:
         self.keys.add(dataset)
@@ -401,18 +449,21 @@ class FakeTables:
             rows = pq.read_metadata(pa.BufferReader(data)).num_rows  # pyright: ignore[reportUnknownMemberType]
         else:
             rows = gzip.decompress(data).count(b"\n")
-        self.rows[f"{request.dataset}:{path}"] = rows - self.short_by
-        return self.rows[f"{request.dataset}:{path}"]
+        into = self._into(request.into)
+        into[f"{request.dataset}:{path}"] = rows - self.short_by
+        return into[f"{request.dataset}:{path}"]
 
     async def record(self, record: LoadRecord) -> None:
         self.records[(record.target, record.source_object)] = record
 
-    async def live_rows(self, dataset: str, release: str) -> int:
-        self.keys.add(dataset)
-        rows = (count for key, count in self.rows.items() if key.startswith(f"{dataset}:"))
-        return sum(rows) - self.collapsed
+    async def live_rows(self, table: TableState, release: str) -> int:
+        self.keys.add(table.dataset)
+        found = self._into(table.into).items()
+        return sum(count for key, count in found if key.startswith(f"{table.dataset}:")) - (
+            self.collapsed
+        )
 
-    async def broken_indexes(self, dataset: str, release: str) -> int:
+    async def broken_indexes(self, table: TableState, release: str) -> int:
         return self.broken
 
     async def duplicates(self, dataset: str, objects: Sequence[ObjectPath]) -> Duplicates:
@@ -453,8 +504,15 @@ class FakeApplied:
             for record in self.records
         )
 
-    async def latest(self, target: str) -> AppliedRelease | None:
-        return next((found for found in reversed(self.records) if found.target == target), None)
+    async def latest(self, target: str, target_uuid: UUID | None = None) -> AppliedRelease | None:
+        return next(
+            (
+                found
+                for found in reversed(self.records)
+                if found.target == target and target_uuid in (None, found.target_uuid)
+            ),
+            None,
+        )
 
 
 class FakeJobs:

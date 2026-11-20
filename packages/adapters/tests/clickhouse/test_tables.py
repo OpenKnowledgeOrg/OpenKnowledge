@@ -19,7 +19,7 @@ from openknowledge_core.ingestion.errors import (
     TableRejected,
     TableUnavailable,
 )
-from openknowledge_core.ingestion.models import LoadObject, TableState
+from openknowledge_core.ingestion.models import LoadObject
 from tests.fakes.ports import PRODUCER, FakeApplied, FakeStore, clock
 
 CONFIG = clickhouse.ClickHouseConfig.model_validate(
@@ -59,7 +59,7 @@ async def test_errors_map_by_exception_code(
 
     async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
         with pytest.raises(error) as raised:
-            await ch.tables.live_rows("papers", "2026-10-06")
+            await ch.tables.table("papers")
     assert str(raised.value).startswith(message)
     assert "hunter2" not in str(raised.value)
 
@@ -152,12 +152,14 @@ async def test_openalex_loads_from_the_contracts_archived_parquet(dataset: str) 
         written = await ch.tables.load(
             LoadObject(
                 dataset=dataset,
+                into=table.into,
                 release="2026-10-14",
                 object_ref=ObjectRef(path=path, generation=1),
             )
         )
-        assert await ch.tables.live_rows(dataset, "2026-10-14") == 2
+        assert await ch.tables.live_rows(table, "2026-10-14") == 2
     assert (table.archive, table.name, written) == (contract.archived, contract.table, 2)
+    assert table.staged and table.into == table.name
     assert table.load_sql_sha256 == sql_sha256(parquet_upsert_query(contract))
     assert queries[-2] == parquet_upsert_query(contract)
     settings = "\nSETTINGS max_threads = 1, max_memory_usage = 6000000000"
@@ -172,29 +174,6 @@ async def test_openalex_loads_from_the_contracts_archived_parquet(dataset: str) 
         "WHERE source_release = {release:Date} AND NOT removed"
         f"{suffix} FORMAT JSONEachRow"
     )
-
-
-async def test_stale_only_checks_receipts_in_the_configured_archive() -> None:
-    release = "2026-10-14"
-    table = TableState(
-        name="openalex_works",
-        dataset="works",
-        archive="archived-works",
-        uuid=UUID(int=1),
-        has_rows=True,
-        load_sql_sha256="1" * 64,
-        delete_sql_sha256="2" * 64,
-        updates="snapshot",
-    )
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        assert "AND startsWith(source_object, {archive:String})" in request.content.decode()
-        query_prefix = "gs://raw/old/openalex/2026-10-14/archived-works/"
-        assert request.url.params["param_archive"] == query_prefix
-        return httpx.Response(200, text='{"1":1}\n')
-
-    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
-        assert await ch.tables.stale(table, release, prefix="old/openalex")
 
 
 async def test_a_retried_parquet_duplicates_check_keeps_its_query_id() -> None:

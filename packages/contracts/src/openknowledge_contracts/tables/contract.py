@@ -62,8 +62,9 @@ class DatasetContract:
             at these paths in the raw data and fail on any; otherwise the stored empty no
             longer tells which one the source sent.
         updates: How the dataset follows its releases. ``diffs`` applies each release's
-            diff. ``snapshot`` loads every release whole and flags the keys a release no
-            longer lists in a ``removed`` column that loads never set.
+            diff. ``snapshot`` loads every release whole: a Parquet table into a copy that
+            replaces it, any other in place, flagging the keys a release no longer lists in a
+            ``removed`` column that loads never set.
         enriched: A nullable field that some records of a key may lack within one release
             while others hold it. A key may then repeat with that difference alone, as long
             as every record holding it agrees, and the table keeps a record holding it.

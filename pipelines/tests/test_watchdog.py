@@ -2,6 +2,7 @@ import logging
 from collections.abc import Awaitable
 from datetime import datetime, timedelta, timezone
 from typing import cast
+from uuid import UUID
 
 import pytest
 from prefect.client.schemas.objects import State
@@ -27,10 +28,10 @@ class WatchedApplied(FakeApplied):
         self.caplog = caplog
         self.logged_before_first_read: list[str] | None = None
 
-    async def latest(self, target: str) -> AppliedRelease | None:
+    async def latest(self, target: str, target_uuid: UUID | None = None) -> AppliedRelease | None:
         if self.logged_before_first_read is None:
             self.logged_before_first_read = [record.getMessage() for record in self.caplog.records]
-        return await super().latest(target)
+        return await super().latest(target, target_uuid)
 
 
 class UnavailableApplied(WatchedApplied):
@@ -40,8 +41,8 @@ class UnavailableApplied(WatchedApplied):
         super().__init__(caplog)
         self.reads = 0
 
-    async def latest(self, target: str) -> AppliedRelease | None:
-        await super().latest(target)
+    async def latest(self, target: str, target_uuid: UUID | None = None) -> AppliedRelease | None:
+        await super().latest(target, target_uuid)
         self.reads += 1
         raise TableUnavailable("ClickHouse query failed (ConnectError); rerun")
 

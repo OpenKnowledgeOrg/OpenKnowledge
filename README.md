@@ -198,6 +198,10 @@ both OpenAlex tables hold it, resuming a failed archive or load, and queueing be
 S2 sync. Its schedule stays off until
 `OKP_OPENALEX_CHECK_SCHEDULE_ENABLED=true`: each new release downloads about 800 GB and
 reindexes every paper.
+Each OpenAlex table loads a release into `<table>_staging`, checks its row count there, and swaps
+it in with `EXCHANGE TABLES`, so the live table always holds one whole release. Disk peaks at the
+live tables plus one staging copy, dropped right after its swap; the database must be Atomic.
+A copy left by a failed load is resumed by the next load of the same release, otherwise replaced.
 
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.

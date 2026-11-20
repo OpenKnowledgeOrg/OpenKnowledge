@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
+from typing import Any
 from uuid import UUID
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
@@ -11,7 +12,10 @@ from openknowledge_adapters.clickhouse.load_sql import (
     delete_query,
     duplicates_parameters,
     duplicates_query,
+    identifier,
+    literal,
     query_parameters,
+    removed_query,
     sql_sha256,
     upsert_query,
 )
@@ -19,7 +23,6 @@ from openknowledge_adapters.clickhouse.parquet_sql import (
     broken_indexes_query,
     parquet_duplicates_parameters,
     parquet_duplicates_query,
-    parquet_removed_query,
     parquet_upsert_query,
     wide_read_settings,
 )
@@ -40,6 +43,30 @@ from openknowledge_core.ingestion.models import (
 
 RECORD_COLUMNS = ", ".join(LoadRecord.model_fields)
 APPLIED_COLUMNS = ", ".join(AppliedRelease.model_fields)
+# ClickHouse local runs in an Overlay database, which exchanges tables too.
+EXCHANGING_ENGINES = frozenset({"Atomic", "Replicated", "Shared", "Overlay"})
+
+
+def staging_table(table: str) -> str:
+    return f"{table}_staging"
+
+
+def stage_statements(table: str) -> tuple[str, str]:
+    """Replace the staging copy with an empty one of the live table's current schema."""
+    staging = identifier(staging_table(table))
+    return (
+        f"DROP TABLE IF EXISTS {staging} SYNC",
+        f"CREATE TABLE {staging} AS {identifier(table)}",
+    )
+
+
+def swap_statements(table: str) -> tuple[str, str]:
+    """Swap the staging copy in under the live name, then drop the table it replaced."""
+    staging = identifier(staging_table(table))
+    return (
+        f"EXCHANGE TABLES {identifier(table)} AND {staging}",
+        f"DROP TABLE IF EXISTS {staging} SYNC",
+    )
 
 
 class ClickHouseTables:
@@ -71,6 +98,8 @@ class ClickHouseTables:
                 )
         return TableState(
             name=contract.table,
+            into=contract.table,
+            staged=_parquet(contract) and contract.updates == "snapshot",
             dataset=contract.name,
             archive=contract.archived,
             uuid=rows[0]["uuid"],
@@ -92,23 +121,70 @@ class ClickHouseTables:
         )
         return LoadRecord.model_validate(rows[0]) if rows else None
 
-    async def stale(self, table: TableState, release: ReleaseId, *, prefix: str) -> bool:
-        """Whether an object in the configured release archive was loaded under outdated SQL."""
+    async def receipts(
+        self, table: TableState, release: ReleaseId, *, prefix: str
+    ) -> dict[str, LoadRecord]:
         archive = ObjectPath.under(self._raw_bucket, prefix.strip("/"), release, table.archive)
         rows = await self._client.rows(
-            "SELECT 1 FROM loads FINAL WHERE target = {target:String} "
-            "AND target_uuid = {uuid:UUID} AND source_release = {release:Date} "
-            "AND startsWith(source_object, {archive:String}) "
-            "AND load_sql_sha256 != if(operation = 'delete', {delete:String}, {upsert:String}) "
-            "LIMIT 1",
+            f"SELECT {RECORD_COLUMNS} FROM loads FINAL WHERE target = {{target:String}} "
+            "AND source_release = {release:Date} AND startsWith(source_object, {archive:String})",
             target=table.name,
-            uuid=str(table.uuid),
             release=release,
             archive=f"{archive}/",
-            delete=table.delete_sql_sha256,
-            upsert=table.load_sql_sha256,
         )
-        return bool(rows)
+        return {row["source_object"]: LoadRecord.model_validate(row) for row in rows}
+
+    async def stage(self, table: TableState, release: ReleaseId) -> TableState:
+        """Reuse a staging copy only with the live schema and no rows of another release."""
+        database = await self._client.rows(
+            "SELECT engine FROM system.databases WHERE name = currentDatabase()"
+        )
+        if database[0]["engine"] not in EXCHANGING_ENGINES:
+            raise TableRejected(
+                f"{table.name} reloads through a copy it exchanges, which a database of engine "
+                f"{database[0]['engine']} cannot do; load it into an Atomic database"
+            )
+        staging = staging_table(table.name)
+        found = await self._found(table.name, staging)
+        copy = found.get(staging)
+        if (
+            copy is None
+            or copy["create_table_query"].replace(staging, table.name, 1)
+            != found[table.name]["create_table_query"]
+            or await self._client.rows(
+                "SELECT 1 FROM {staging:Identifier} WHERE source_release != {release:Date} LIMIT 1",
+                staging=staging,
+                release=release,
+            )
+        ):
+            for statement in stage_statements(table.name):
+                await self._client.post(statement)
+            copy = (await self._found(staging))[staging]
+        return table.model_copy(
+            update={
+                "into": staging,
+                "uuid": UUID(copy["uuid"]),
+                "has_rows": bool(int(copy["total_rows"] or 0)),
+            }
+        )
+
+    async def swap(self, table: TableState) -> None:
+        exchange, drop = swap_statements(table.name)
+        if table.into != table.name:
+            await self._client.post(exchange)
+        await self._client.post(drop)
+
+    async def drop_leftover(self, table: TableState, held: ReleaseId) -> None:
+        staging = staging_table(table.name)
+        if not table.staged or staging not in await self._found(staging):
+            return
+        newer = await self._client.rows(
+            "SELECT 1 FROM {staging:Identifier} WHERE source_release > {held:Date} LIMIT 1",
+            staging=staging,
+            held=held,
+        )
+        if not newer:
+            await self._client.post(f"DROP TABLE IF EXISTS {identifier(staging)} SYNC")
 
     async def load(self, request: LoadObject) -> int:
         contract = _contract(request.dataset)
@@ -117,8 +193,10 @@ class ClickHouseTables:
             if _parquet(contract):
                 raise TableRejected(f"{contract.table} is a snapshot and takes no deletes")
             query = delete_query(contract)
+        elif _parquet(contract):
+            query = parquet_upsert_query(contract, into=request.into)
         else:
-            query = _upsert(contract)
+            query = upsert_query(contract)
         parameters = query_parameters(
             source_file=path.name, release=request.release, source_object=str(path)
         )
@@ -129,8 +207,8 @@ class ClickHouseTables:
             "INSERT INTO loads FORMAT JSONEachRow", data=record.model_dump_json()
         )
 
-    async def live_rows(self, dataset: DatasetName, release: ReleaseId) -> int:
-        contract = _contract(dataset)
+    async def live_rows(self, table: TableState, release: ReleaseId) -> int:
+        contract = _contract(table.dataset)
         query = (
             "SELECT count() AS rows FROM {table:Identifier} FINAL "
             "WHERE source_release = {release:Date}"
@@ -138,15 +216,15 @@ class ClickHouseTables:
         if contract.updates == "snapshot":
             query += f" AND NOT {REMOVED}"
         rows = await self._client.rows(
-            query + wide_read_settings(contract), table=contract.table, release=release
+            query + wide_read_settings(contract), table=table.into, release=release
         )
         return int(rows[0]["rows"])
 
-    async def broken_indexes(self, dataset: DatasetName, release: ReleaseId) -> int:
-        query = broken_indexes_query(_contract(dataset))
+    async def broken_indexes(self, table: TableState, release: ReleaseId) -> int:
+        query = broken_indexes_query(_contract(table.dataset))
         if query is None:
             return 0
-        rows = await self._client.rows(query, release=release)
+        rows = await self._client.rows(query, table=table.into, release=release)
         return int(rows[0]["rows"])
 
     async def duplicates(self, dataset: DatasetName, objects: Sequence[ObjectPath]) -> Duplicates:
@@ -167,9 +245,15 @@ class ClickHouseTables:
         return Duplicates.model_validate(rows[0])
 
     async def mark_removed(self, dataset: DatasetName, release: ReleaseId) -> int:
-        return await self._client.written(
-            parquet_removed_query(_contract(dataset)), source_release=release
+        return await self._client.written(removed_query(_contract(dataset)), source_release=release)
+
+    async def _found(self, *names: str) -> dict[str, dict[str, Any]]:
+        rows = await self._client.rows(
+            "SELECT name, uuid, total_rows, create_table_query FROM system.tables "
+            "WHERE database = currentDatabase() AND has({names:Array(String)}, name)",
+            names="[" + ", ".join(literal(name) for name in names) + "]",
         )
+        return {row["name"]: row for row in rows}
 
     def _readable(self, path: ObjectPath) -> ObjectPath:
         if path.bucket != self._raw_bucket:
@@ -216,11 +300,13 @@ class ClickHouseAppliedReleases:
         )
         return bool(rows)
 
-    async def latest(self, target: str) -> AppliedRelease | None:
+    async def latest(self, target: str, target_uuid: UUID | None = None) -> AppliedRelease | None:
         rows = await self._client.rows(
-            f"SELECT {APPLIED_COLUMNS} FROM applied "
-            "WHERE target = {target:String} ORDER BY applied_at DESC LIMIT 1",
+            f"SELECT {APPLIED_COLUMNS} FROM applied WHERE target = {{target:String}} "
+            + ("" if target_uuid is None else "AND target_uuid = {uuid:UUID} ")
+            + "ORDER BY applied_at DESC LIMIT 1",
             target=target,
+            **({} if target_uuid is None else {"uuid": str(target_uuid)}),
         )
         return AppliedRelease.model_validate(rows[0]) if rows else None
 

@@ -16,6 +16,7 @@ from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
 from openknowledge_contracts.sources import SOURCES
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
+    LoadDataset,
     LoadDatasetService,
     ShardJobs,
     WatchdogService,
@@ -26,7 +27,6 @@ from openknowledge_core.ingestion.coordinator import CORE_ORDER, LARGE_ORDER
 from openknowledge_core.ingestion.errors import IngestionError
 from openknowledge_core.ingestion.families import ArchiveFamily
 from openknowledge_core.ingestion.measurement import LoadObservation
-from openknowledge_core.ingestion.models import held_release
 from openknowledge_core.ingestion.ports import LoadTelemetry, ReadTables
 from openknowledge_core.search import IndexPapers, SearchIndexService
 from openknowledge_core.search.commands import IndexPapersResult
@@ -370,32 +370,45 @@ async def open_held_releases(
     settings: LoadSettings,
     *,
     prefix: str,
+    tidy: bool = False,
 ) -> AsyncGenerator[
     tuple[
-        Callable[[DatasetName], Awaitable[ReleaseId | None]],
+        Callable[[DatasetName, ReleaseId], Awaitable[bool]],
         Callable[[ReleaseId], Awaitable[bool]],
     ],
     None,
 ]:
-    """The release each dataset's table holds, and whether OpenAlex built the read tables.
+    """Whether a dataset's table holds a release, and whether OpenAlex built the read tables.
 
-    A table holds the release applied to its live table, which has rows, and only while every
-    object of it was loaded under the SQL the table loads with now. ``built`` says whether the
-    OpenAlex read tables were built from a release.
+    A table holds a release as LoadDatasetService.holds decides, from the archive under
+    ``prefix`` in the raw bucket. ``tidy``, only for a caller holding the loader lease, drops
+    the staging copy a table that holds the release has left over.
     """
-    async with clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch:
+    async with (
+        gcs.connect(_gcs(settings)) as store,
+        clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
+    ):
+        service = LoadDatasetService(
+            store=store,
+            tables=ch.tables,
+            applied=ch.applied,
+            producer=producer(settings),
+            clock=lambda: datetime.now(UTC),
+        )
 
-        async def held(dataset: DatasetName) -> ReleaseId | None:
-            table = await ch.tables.table(dataset)
-            release = held_release(table, await ch.applied.latest(table.name))
-            if release is None or await ch.tables.stale(table, release, prefix=prefix):
-                return None
-            return release
+        async def holds(dataset: DatasetName, release: ReleaseId) -> bool:
+            command = LoadDataset(
+                release=release,
+                dataset=dataset,
+                bucket=settings.clickhouse_raw_bucket,
+                prefix=prefix,
+            )
+            return await service.holds(command, tidy=tidy)
 
         async def built(release: ReleaseId) -> bool:
             return await ch.read_tables.built_from("openalex", release)
 
-        yield held, built
+        yield holds, built
 
 
 async def _index_search_part(settings: SearchSettings, command: IndexPapers) -> IndexPapersResult:

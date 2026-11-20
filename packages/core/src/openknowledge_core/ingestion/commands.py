@@ -115,6 +115,8 @@ class LoadDataset(BaseModel):
 class LoadDatasetResult(BaseModel):
     """``removed`` counts the rows that flag keys a snapshot release no longer lists.
 
+    A staged table is replaced whole, so it flags none.
+
     ``broken_indexes`` counts the live rows whose abstract index was unreadable, which loaded
     with an empty abstract.
     """

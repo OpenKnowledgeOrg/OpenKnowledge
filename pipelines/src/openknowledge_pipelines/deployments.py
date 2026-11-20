@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -14,7 +15,7 @@ from prefect.client.orchestration import get_client
 from prefect.client.schemas.actions import DeploymentScheduleCreate, GlobalConcurrencyLimitCreate
 from prefect.client.schemas.objects import ConcurrencyLimitConfig, ConcurrencyLimitStrategy
 from prefect.client.schemas.schedules import CronSchedule
-from prefect.concurrency.asyncio import concurrency
+from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError, concurrency
 from prefect.deployments.runner import RunnerDeployment
 from prefect.exceptions import ObjectNotFound
 from prefect.types.entrypoint import EntrypointType
@@ -54,6 +55,8 @@ from openknowledge_pipelines.settings import (
     SyncSettings,
     WatchdogSettings,
 )
+
+log = logging.getLogger(__name__)
 
 DEPLOYMENT = "control-vm"
 # Keep the existing process budget. Busy downloads fail acquisition promptly to release slots
@@ -234,16 +237,30 @@ async def openalex_load(
             flows.dataset.fn,
             command,
             lambda: read_tables.build(bootstrap.producer(settings), lambda: datetime.now(UTC)),
-            partial(_release_state, settings, prefix=command.prefix) if recheck else None,
+            partial(_release_state, settings, prefix=command.prefix, tidy=True)
+            if recheck
+            else None,
         )
 
 
 async def _release_state(
-    settings: LoadSettings, release: ReleaseId, *, prefix: str
+    settings: LoadSettings, release: ReleaseId, *, prefix: str, tidy: bool = False
 ) -> ReleaseState:
-    async with bootstrap.open_held_releases(settings, prefix=prefix) as (held, built):
-        behind = [name for name in SOURCES["openalex"].contracts if await held(name) != release]
+    async with bootstrap.open_held_releases(settings, prefix=prefix, tidy=tidy) as (holds, built):
+        behind = [name for name in SOURCES["openalex"].contracts if not await holds(name, release)]
         return ReleaseState(behind=tuple(behind), built=await built(release))
+
+
+async def _tidy(settings: LoadSettings, release: ReleaseId, *, prefix: str) -> None:
+    """Drop leftover staging copies, only if the loader lease is free at once.
+
+    A load holding the lease may be filling a fresh, still empty copy.
+    """
+    try:
+        async with one_clickhouse_loader(wait=False), admission.execution():
+            await _release_state(settings, release, prefix=prefix, tidy=True)
+    except ConcurrencySlotAcquisitionError as exc:
+        log.info("leftover staging copies stay until a later check: %s", exc)
 
 
 @flow(name="openalex-release-check", persist_result=False, retries=0)
@@ -269,7 +286,7 @@ async def openalex_release_check(prefix: str = "openalex") -> OpenAlexLoadResult
             OpenAlexLoad(release=release, bucket=bucket, prefix=prefix), wait=True, recheck=True
         )
 
-    return await check_release(latest, state, take)
+    return await check_release(latest, state, take, partial(_tidy, load_settings, prefix=prefix))
 
 
 @flow(name="openalex-batch-download", persist_result=False)

@@ -86,6 +86,34 @@ class ArtifactStore(Protocol):
 class TableLoader(Protocol):
     async def table(self, dataset: DatasetName) -> TableState: ...
 
+    async def receipts(
+        self, table: TableState, release: ReleaseId, *, prefix: str
+    ) -> Mapping[str, LoadRecord]:
+        """The receipt of each object of ``release`` archived under ``prefix``, by object."""
+        ...
+
+    async def stage(self, table: TableState, release: ReleaseId) -> TableState:
+        """The empty staging copy of a staged table, or the one a run of ``release`` left.
+
+        Raises TableRejected where the database cannot exchange tables.
+        """
+        ...
+
+    async def swap(self, table: TableState) -> None:
+        """Exchange the staging copy ``table`` loaded with the live table, then drop the old one.
+
+        Given the live table, it only drops a staging copy left behind.
+        """
+        ...
+
+    async def drop_leftover(self, table: TableState, held: ReleaseId) -> None:
+        """Drop a staging copy of a staged table that holds no release newer than ``held``.
+
+        A crash between the swap and its drop leaves the old release there; a copy of a newer
+        release is a load to resume.
+        """
+        ...
+
     async def loaded(
         self, dataset: DatasetName, source_object: ObjectPath
     ) -> LoadRecord | None: ...
@@ -96,9 +124,9 @@ class TableLoader(Protocol):
 
     async def record(self, record: LoadRecord) -> None: ...
 
-    async def live_rows(self, dataset: DatasetName, release: ReleaseId) -> int: ...
+    async def live_rows(self, table: TableState, release: ReleaseId) -> int: ...
 
-    async def broken_indexes(self, dataset: DatasetName, release: ReleaseId) -> int:
+    async def broken_indexes(self, table: TableState, release: ReleaseId) -> int:
         """Live rows of ``release`` whose abstract index was unreadable and loaded empty."""
         ...
 
@@ -122,8 +150,11 @@ class AppliedReleases(Protocol):
 
     async def record(self, applied: AppliedRelease) -> None: ...
 
-    async def latest(self, target: str) -> AppliedRelease | None:
-        """The last release recorded for the table, whatever UUID it had then."""
+    async def latest(self, target: str, target_uuid: UUID | None = None) -> AppliedRelease | None:
+        """The last release recorded for the table, whatever UUID it had then.
+
+        With ``target_uuid``, the last one recorded under that UUID.
+        """
         ...
 
 

@@ -26,7 +26,6 @@ from openknowledge_adapters.clickhouse.load_sql import (
     identifier,
     literal,
     provenance,
-    removed_query,
 )
 from openknowledge_contracts.datasets import DatasetName
 from openknowledge_contracts.tables import DatasetContract
@@ -340,8 +339,13 @@ def _no_subcolumns(contract: DatasetContract) -> str:
     return ""
 
 
-def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> str:
-    """Insert every row of one Parquet object as a current row of ``contract.table``."""
+def parquet_upsert_query(
+    contract: DatasetContract, source: Source = "s3", into: str | None = None
+) -> str:
+    """Insert every row of one Parquet object as a current row of ``contract.table``.
+
+    ``into`` names the staging copy to insert into instead; the receipts hash the query without.
+    """
     selects = SELECTS[contract.name]
     names = [field.name for field in fields_of(contract.source)]
     if list(selects) != names:
@@ -357,7 +361,7 @@ def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> st
     if _wide(contract):
         settings += f", {_WIDE_SETTINGS}, {_WIDE_INSERT_SETTINGS}"
     return (
-        f"INSERT INTO {identifier(contract.table)} ({columns})\n"
+        f"INSERT INTO {identifier(into or contract.table)} ({columns})\n"
         f"SETTINGS {settings}\n"
         f"{_with(contract.name)}"
         f"SELECT\n    {selected}\n"
@@ -366,19 +370,12 @@ def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> st
     )
 
 
-def parquet_removed_query(contract: DatasetContract) -> str:
-    query = removed_query(contract)
-    if _wide(contract):
-        return f"{query}\nSETTINGS {_WIDE_READ_SETTINGS}, {_WIDE_INSERT_SETTINGS}"
-    return query
-
-
 def broken_indexes_query(contract: DatasetContract) -> str | None:
-    """The live rows of ``release`` loaded from a broken index, for a table that flags them."""
+    """The rows of ``release`` in ``table`` loaded from a broken index, where they are flagged."""
     if BROKEN_INDEX not in contract.source.names:
         return None
     return (
-        f"SELECT countIf({BROKEN_INDEX}) AS rows FROM {identifier(contract.table)} FINAL "
+        f"SELECT countIf({BROKEN_INDEX}) AS rows FROM {{table:Identifier}} FINAL "
         "WHERE source_release = {release:Date} AND NOT removed"
         f"{wide_read_settings(contract)}"
     )

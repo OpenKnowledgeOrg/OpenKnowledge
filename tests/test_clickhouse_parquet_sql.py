@@ -6,6 +6,7 @@ load reads, since ClickHouse reads no other.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,17 +16,18 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from openknowledge_adapters.clickhouse.load_sql import (
-    query_parameters,
-    removed_query,
-)
+from openknowledge_adapters.clickhouse.load_sql import query_parameters, sql_sha256
 from openknowledge_adapters.clickhouse.parquet_sql import (
     SELECTS,
     broken_indexes_query,
     parquet_duplicates_parameters,
     parquet_duplicates_query,
-    parquet_removed_query,
     parquet_upsert_query,
+)
+from openknowledge_adapters.clickhouse.tables import (
+    stage_statements,
+    staging_table,
+    swap_statements,
 )
 from openknowledge_contracts.tables import DatasetContract
 from openknowledge_contracts.tables.clickhouse import table_columns
@@ -361,23 +363,13 @@ def test_a_broken_index_loads_an_empty_abstract_and_is_counted(tmp_path: Path) -
     }
     query = broken_indexes_query(WORKS_ABSTRACTS)
     assert query is not None and broken_indexes_query(WORKS) is None
-    (count,) = clickhouse_local(f"{query} FORMAT JSONEachRow;", tmp_path / "db", release=RELEASE)
+    (count,) = clickhouse_local(
+        f"{query} FORMAT JSONEachRow;",
+        tmp_path / "db",
+        release=RELEASE,
+        table=WORKS_ABSTRACTS.table,
+    )
     assert int(count["rows"]) == len(BROKEN)
-
-
-def load(workdir: Path, contract: DatasetContract, name: str, release: str) -> None:
-    sql = f"{up()}\n{parquet_upsert_query(contract, 'file')};"
-    clickhouse_local(sql, workdir / "db", **params(workdir / name, release))
-
-
-def mark_removed(workdir: Path, contract: DatasetContract, release: str) -> None:
-    clickhouse_local(f"{removed_query(contract)};", workdir / "db", source_release=release)
-
-
-def final_rows(workdir: Path, table: str) -> dict[int, tuple[bool, str]]:
-    sql = f"SELECT work_id, removed, source_release FROM {table} FINAL FORMAT JSONEachRow;"
-    rows = clickhouse_local(sql, workdir / "db")
-    return {row["work_id"]: (row["removed"], row["source_release"]) for row in rows}
 
 
 def duplicates(workdir: Path, contract: DatasetContract, names: list[str]) -> dict[str, Any]:
@@ -387,20 +379,47 @@ def duplicates(workdir: Path, contract: DatasetContract, names: list[str]) -> di
     return row
 
 
-@needs_clickhouse
-def test_a_newer_release_flags_works_it_no_longer_lists_in_both_tables(tmp_path: Path) -> None:
-    write_works(
-        tmp_path / "a1.parquet", [work("https://openalex.org/W1"), work("https://openalex.org/W2")]
+def test_the_load_sql_receipts_hash_is_unchanged() -> None:
+    hashes = "".join(sql_sha256(parquet_upsert_query(c)) for c in CONTRACTS.values())
+    # Receipts hold these hashes; a change reloads every OpenAlex table.
+    assert hashlib.sha256(hashes.encode()).hexdigest() == (
+        "0f024d86b5f470587ad384f8554d15e64f2c9490ec22f25129bcfd87f2231c9f"
     )
-    write_works(tmp_path / "b1.parquet", [work("https://openalex.org/W1")])
-    for contract in (WORKS, WORKS_ABSTRACTS):
-        load(tmp_path, contract, "a1.parquet", release="2026-10-14")
-        load(tmp_path, contract, "b1.parquet", release="2027-01-13")
-        mark_removed(tmp_path, contract, release="2027-01-13")
-        assert final_rows(tmp_path, contract.table) == {
-            1: (False, "2027-01-13"),
-            2: (True, "2027-01-13"),
-        }
+
+
+@needs_clickhouse
+def test_a_staged_load_swaps_in_under_the_live_name_with_the_copys_uuid(tmp_path: Path) -> None:
+    write_works(tmp_path / "b.parquet", [work("https://openalex.org/W2")])
+    live, staging = WORKS.table, staging_table(WORKS.table)
+    uuids = (
+        "SELECT name, toString(uuid) AS uuid FROM system.tables "
+        f"WHERE database = currentDatabase() AND name IN ('{live}', '{staging}') "
+        "ORDER BY name FORMAT JSONEachRow;"
+    )
+    works = f"SELECT work_id, source_release FROM {live} ORDER BY work_id FORMAT JSONEachRow;"
+    # As on the server, an Atomic database, whose tables have UUIDs; clickhouse local's own
+    # reports none. There it waits forever on DROP ... SYNC, so the exchange is run alone.
+    sql = f"""
+        CREATE DATABASE hub ENGINE = Atomic;
+        USE hub;
+        {up()}
+        INSERT INTO {live} (work_id, source_release) VALUES (1, '2026-10-14');
+        {";".join(stage_statements(live))};
+        {uuids}
+        {parquet_upsert_query(WORKS, "file", into=staging)};
+        {works}
+        {swap_statements(live)[0]};
+        {uuids}
+        {works}
+    """
+    rows = clickhouse_local(sql, tmp_path / "db", **params(tmp_path / "b.parquet", "2027-01-13"))
+    before, after = rows[:2], rows[3:5]
+    assert rows[2] == {"work_id": 1, "source_release": "2026-10-14"}
+    assert after == [
+        {"name": live, "uuid": before[1]["uuid"]},
+        {"name": staging, "uuid": before[0]["uuid"]},
+    ]
+    assert rows[5:] == [{"work_id": 2, "source_release": "2027-01-13"}]
 
 
 @needs_clickhouse
@@ -535,13 +554,6 @@ def test_nested_work_projections_round_trip(tmp_path: Path) -> None:
     assert topics["concepts"][0]["id"] == 41008148
 
     locations = CONTRACTS["works-locations"]
-    assert clickhouse_local(
-        f"{parquet_removed_query(locations)}; "
-        "SELECT countIf(removed) AS removed FROM openalex_work_locations FINAL FORMAT JSONEachRow;",
-        tmp_path / "db",
-        source_release="2027-01-13",
-    ) == [{"removed": 2}]
-
     duplicates = parquet_duplicates_query(locations, "file") + "\nFORMAT JSONEachRow"
     repeated = [rows[0], *rows, {**rows[1], "locations_count": 9}]
     pq.write_table(pa.Table.from_pylist(repeated, schema=schema), path)  # pyright: ignore[reportUnknownMemberType]
