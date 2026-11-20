@@ -431,8 +431,8 @@ class ClickHouseReadTables:
     ) -> bool:
         """Whether both OpenAlex tables show just their one applied release.
 
-        A failed or running load leaves newer rows that FINAL already shows, so the group keeps
-        its last build until the load completes.
+        A load swaps its release in whole, but one from before staging left newer rows that
+        FINAL already shows, so the group keeps its last build until the load completes.
         """
         held = {table: held_release(*found) for table, found in openalex.items()}
         if len(set(held.values())) > 1:
