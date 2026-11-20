@@ -64,6 +64,8 @@ class EmbeddingLocations:
             load_sql_sha256=digest,
             delete_sql_sha256=digest,
             updates="diffs",
+            into=TABLE,
+            staged=False,
         )
 
     async def load(self, release: ReleaseId, blob: str, parquet: bytes) -> int:
