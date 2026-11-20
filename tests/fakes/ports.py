@@ -401,6 +401,16 @@ class FakeTables:
     async def stale(self, table: TableState, release: str, *, prefix: str) -> bool:
         return self.outdated
 
+    async def current(self, table: TableState, release: str, *, prefix: str) -> int:
+        if self.outdated:
+            return 0
+        return sum(
+            record.target == table.name
+            and record.target_uuid == table.uuid
+            and record.source_release == release
+            for record in self.records.values()
+        )
+
     async def stage(self, table: TableState, release: str) -> TableState:
         if self.staging_uuid is None or self.staging_release != release:
             self.copies += 1
@@ -420,6 +430,10 @@ class FakeTables:
             self.uuid, self.rows = table.uuid, self.staging_rows
         self.swaps += 1
         self.staging_uuid, self.staging_release, self.staging_rows = None, None, {}
+
+    async def drop_leftover(self, table: TableState, held: str) -> None:
+        if self.staging_release is None or self.staging_release <= held:
+            self.staging_uuid, self.staging_release, self.staging_rows = None, None, {}
 
     def _into(self, table: str) -> dict[str, int]:
         return self.staging_rows if table.endswith("_staging") else self.rows
@@ -495,8 +509,15 @@ class FakeApplied:
             for record in self.records
         )
 
-    async def latest(self, target: str) -> AppliedRelease | None:
-        return next((found for found in reversed(self.records) if found.target == target), None)
+    async def latest(self, target: str, target_uuid: UUID | None = None) -> AppliedRelease | None:
+        return next(
+            (
+                found
+                for found in reversed(self.records)
+                if found.target == target and target_uuid in (None, found.target_uuid)
+            ),
+            None,
+        )
 
 
 class FakeJobs:

@@ -143,6 +143,22 @@ class ClickHouseTables:
         )
         return bool(rows)
 
+    async def current(self, table: TableState, release: ReleaseId, *, prefix: str) -> int:
+        archive = ObjectPath.under(self._raw_bucket, prefix.strip("/"), release, table.archive)
+        rows = await self._client.rows(
+            "SELECT count() AS objects FROM loads FINAL WHERE target = {target:String} "
+            "AND source_release = {release:Date} "
+            "AND startsWith(source_object, {archive:String}) AND target_uuid = {uuid:UUID} "
+            "AND load_sql_sha256 = if(operation = 'delete', {delete:String}, {upsert:String})",
+            target=table.name,
+            uuid=str(table.uuid),
+            release=release,
+            archive=f"{archive}/",
+            delete=table.delete_sql_sha256,
+            upsert=table.load_sql_sha256,
+        )
+        return int(rows[0]["objects"])
+
     async def stage(self, table: TableState, release: ReleaseId) -> TableState:
         """Reuse a staging copy only with the live schema and no rows of another release."""
         database = await self._client.rows(
@@ -182,6 +198,18 @@ class ClickHouseTables:
         if table.into != table.name:
             await self._client.post(exchange)
         await self._client.post(drop)
+
+    async def drop_leftover(self, table: TableState, held: ReleaseId) -> None:
+        staging = staging_table(table.name)
+        if not table.staged or staging not in await self._found(staging):
+            return
+        newer = await self._client.rows(
+            "SELECT 1 FROM {staging:Identifier} WHERE source_release > {held:Date} LIMIT 1",
+            staging=staging,
+            held=held,
+        )
+        if not newer:
+            await self._client.post(f"DROP TABLE IF EXISTS {identifier(staging)} SYNC")
 
     async def load(self, request: LoadObject) -> int:
         contract = _contract(request.dataset)
@@ -297,11 +325,13 @@ class ClickHouseAppliedReleases:
         )
         return bool(rows)
 
-    async def latest(self, target: str) -> AppliedRelease | None:
+    async def latest(self, target: str, target_uuid: UUID | None = None) -> AppliedRelease | None:
         rows = await self._client.rows(
-            f"SELECT {APPLIED_COLUMNS} FROM applied "
-            "WHERE target = {target:String} ORDER BY applied_at DESC LIMIT 1",
+            f"SELECT {APPLIED_COLUMNS} FROM applied WHERE target = {{target:String}} "
+            + ("" if target_uuid is None else "AND target_uuid = {uuid:UUID} ")
+            + "ORDER BY applied_at DESC LIMIT 1",
             target=target,
+            **({} if target_uuid is None else {"uuid": str(target_uuid)}),
         )
         return AppliedRelease.model_validate(rows[0]) if rows else None
 

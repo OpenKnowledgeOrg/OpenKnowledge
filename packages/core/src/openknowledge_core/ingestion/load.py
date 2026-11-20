@@ -86,11 +86,13 @@ class LoadDatasetService:
     async def prepare(self, command: LoadDataset) -> PreparedLoad:
         """A table that holds a release takes only that base again, or a newer snapshot.
 
-        A staged table loads into its staging copy, unless it holds the release under current
-        receipts already, when the load only checks it again.
+        A staged table loads into its staging copy, unless it holds the release with a current
+        receipt for every object already, when the load only checks it again. What the table
+        holds is the release last recorded under its UUID, which a swap that failed after its
+        marker does not change.
         """
         table = await self._tables.table(command.dataset)
-        held = held_release(table, await self._applied.latest(table.name))
+        held = held_release(table, await self._applied.latest(table.name, table.uuid))
         if held is not None and (
             command.release < held or (table.updates == "diffs" and command.release != held)
         ):
@@ -105,7 +107,8 @@ class LoadDatasetService:
         manifest = await self._manifest(path, command.release, table.archive, hint)
         if table.staged and (
             held != command.release
-            or await self._tables.stale(table, command.release, prefix=command.prefix)
+            or await self._tables.current(table, command.release, prefix=command.prefix)
+            != len(manifest.entries)
         ):
             table = await self._tables.stage(table, command.release)
         prepared = PreparedLoad(manifest_path=path, manifest=manifest, table=table)

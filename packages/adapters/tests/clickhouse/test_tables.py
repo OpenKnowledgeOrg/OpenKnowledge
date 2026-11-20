@@ -240,6 +240,17 @@ async def test_stale_checks_receipts_in_the_configured_archive_for_sql_and_uuid(
         )
         assert result.returncode == 0, result.stderr
         assert await ch.tables.stale(table, release, prefix="openalex")
+        assert await ch.tables.current(table, release, prefix="openalex") == 0
+        result = run(
+            receipt,
+            tmp_path,
+            uuid=str(table.uuid),
+            release=release,
+            path="gs://raw/openalex/2026-10-14/works/part2.parquet",
+            hash=table.load_sql_sha256,
+        )
+        assert result.returncode == 0, result.stderr
+        assert await ch.tables.current(table, release, prefix="openalex") == 1
 
 
 @needs_clickhouse
@@ -283,6 +294,14 @@ async def test_a_staging_copy_is_reused_only_for_its_release_and_the_live_schema
         insert(staged.into, (2, new), (4, new))
         await ch.tables.swap(staged)
         await ch.tables.swap(live)  # a retry only drops what is left
+        # A copy of a newer release is a load to resume; one of the held release is left over.
+        sql(f"CREATE TABLE {staged.into} AS openalex_works")
+        insert(staged.into, (5, "2027-04-14"))
+        await ch.tables.drop_leftover(live, new)
+        assert sql(f"SELECT count() FROM {staged.into}") == ["1"]
+        sql(f"TRUNCATE TABLE {staged.into}")
+        insert(staged.into, (5, old))
+        await ch.tables.drop_leftover(live, new)
     assert sql("SELECT work_id, source_release FROM openalex_works ORDER BY work_id") == [
         "2",
         new,

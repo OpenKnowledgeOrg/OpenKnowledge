@@ -241,8 +241,8 @@ async def openalex_load(
 async def _release_state(
     settings: LoadSettings, release: ReleaseId, *, prefix: str
 ) -> ReleaseState:
-    async with bootstrap.open_held_releases(settings, prefix=prefix) as (held, built):
-        behind = [name for name in SOURCES["openalex"].contracts if await held(name) != release]
+    async with bootstrap.open_held_releases(settings, prefix=prefix) as (holds, built):
+        behind = [name for name in SOURCES["openalex"].contracts if not await holds(name, release)]
         return ReleaseState(behind=tuple(behind), built=await built(release))
 
 

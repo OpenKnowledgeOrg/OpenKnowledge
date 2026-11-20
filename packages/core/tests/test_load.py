@@ -284,6 +284,12 @@ async def test_a_staged_table_takes_each_release_through_a_copy_it_swaps_in(
     assert (result.loaded, result.live_rows, result.removed, staged.marked) == (2, 51, 0, [])
     assert (staged.copies, staged.uuid) == (2, UUID(int=102))
     assert held(applied) == [(UUID(int=101), RELEASE)] * 2 + [(UUID(int=102), NEXT)]
+    # An object without a receipt sends the rerun through a fresh copy, not into the live table.
+    del staged.records[
+        next(key for key, found in staged.records.items() if found.source_release == NEXT)
+    ]
+    rerun = await load(store, staged, applied, LOAD_NEXT)
+    assert (rerun.loaded, staged.copies, staged.uuid) == (2, 3, UUID(int=103))
 
 
 async def test_a_failed_check_or_a_crash_before_the_swap_leaves_the_live_table(
@@ -309,7 +315,10 @@ async def test_a_failed_check_or_a_crash_before_the_swap_leaves_the_live_table(
         await load(store, staged, applied, LOAD_NEXT)
     assert (staged.uuid, held(applied)[-1]) == (UUID(int=101), (UUID(int=102), NEXT))
     monkeypatch.undo()
-    # The marker names the copy, so the live table holds no release; the copy is reused.
+    # The latest marker names the copy, but the live table still refuses an older release.
+    with pytest.raises(BaseRefused, match=f"holds {RELEASE}"):
+        await load(store, staged, applied, LOAD.model_copy(update={"release": "2026-09-29"}))
+    # The copy is reused.
     service = loader(store, staged, applied)
     prepared = await service.prepare(LOAD_NEXT)
     outcomes = [await service.load_object(prepared, entry) for entry in prepared.manifest.entries]

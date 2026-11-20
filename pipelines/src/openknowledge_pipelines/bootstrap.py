@@ -372,30 +372,33 @@ async def open_held_releases(
     prefix: str,
 ) -> AsyncGenerator[
     tuple[
-        Callable[[DatasetName], Awaitable[ReleaseId | None]],
+        Callable[[DatasetName, ReleaseId], Awaitable[bool]],
         Callable[[ReleaseId], Awaitable[bool]],
     ],
     None,
 ]:
-    """The release each dataset's table holds, and whether OpenAlex built the read tables.
+    """Whether a dataset's table holds a release, and whether OpenAlex built the read tables.
 
     A table holds the release applied to its live table, which has rows, and only while every
-    object of it was loaded under the SQL the table loads with now. ``built`` says whether the
-    OpenAlex read tables were built from a release.
+    object of it was loaded under the SQL the table loads with now. A table that holds it drops
+    the staging copy a crash between swap and drop left. ``built`` says whether the OpenAlex
+    read tables were built from a release.
     """
     async with clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch:
 
-        async def held(dataset: DatasetName) -> ReleaseId | None:
+        async def holds(dataset: DatasetName, release: ReleaseId) -> bool:
             table = await ch.tables.table(dataset)
-            release = held_release(table, await ch.applied.latest(table.name))
-            if release is None or await ch.tables.stale(table, release, prefix=prefix):
-                return None
-            return release
+            if held_release(table, await ch.applied.latest(table.name)) != release or (
+                await ch.tables.stale(table, release, prefix=prefix)
+            ):
+                return False
+            await ch.tables.drop_leftover(table, release)
+            return True
 
         async def built(release: ReleaseId) -> bool:
             return await ch.read_tables.built_from("openalex", release)
 
-        yield held, built
+        yield holds, built
 
 
 async def _index_search_part(settings: SearchSettings, command: IndexPapers) -> IndexPapersResult:
