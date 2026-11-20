@@ -12,13 +12,14 @@ class ClickHouseIndexed:
 
     async def state(self) -> SearchState:
         rows = await self._client.rows(
-            "SELECT a.target, a.release, a.target_uuid FROM "
-            "(SELECT target, release, target_uuid FROM applied "
-            "WHERE target IN ('papers', 'abstracts', 'tldrs', 'paper_abstract_best', "
-            "'openalex_works') "
-            "ORDER BY applied_at DESC LIMIT 1 BY target) a "
-            "INNER JOIN system.tables t ON t.name = a.target AND t.uuid = a.target_uuid "
-            "WHERE t.database = currentDatabase()"
+            # Only receipts of the live tables count: a staged load records its copy's
+            # UUID just before it swaps the copy in.
+            "SELECT a.target AS target, a.release AS release, a.target_uuid AS target_uuid "
+            "FROM applied a INNER JOIN system.tables t "
+            "ON t.name = a.target AND t.uuid = a.target_uuid "
+            "WHERE a.target IN ('papers', 'abstracts', 'tldrs', 'paper_abstract_best', "
+            "'openalex_works') AND t.database = currentDatabase() "
+            "ORDER BY a.applied_at DESC LIMIT 1 BY a.target"
         )
         built = await self._client.rows(
             "SELECT a.release AS release FROM applied a INNER JOIN system.tables t "
