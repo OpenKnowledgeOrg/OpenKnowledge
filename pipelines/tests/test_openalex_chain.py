@@ -57,7 +57,7 @@ async def test_a_new_release_is_loaded_then_built_and_a_loaded_one_starts_nothin
     first = await check_release(latest, loaded, take)
     names = [event.split()[1] for event in events[:-1]]
     assert set(names) == CONTRACTS.keys()
-    assert names[:4] == ["sources", "sources-full", "works", "works-abstracts"]
+    assert names[:4] == ["sources", "works", "works-abstracts", "sources-full"]
     assert names[-7:] == [
         "openalex-authors",
         "awards",

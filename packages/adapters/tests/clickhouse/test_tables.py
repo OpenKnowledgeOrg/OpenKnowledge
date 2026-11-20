@@ -139,6 +139,8 @@ async def test_openalex_loads_from_the_contracts_archived_parquet(dataset: str) 
         if "system.tables" in queries[-1]:
             row = {"uuid": "00000000-0000-0000-0000-000000000001", "total_rows": 0}
             return httpx.Response(200, text=json.dumps(row))
+        if queries[-1].startswith("SELECT count()"):
+            return httpx.Response(200, text='{"rows":2}')
         return httpx.Response(200, headers={"X-ClickHouse-Summary": '{"written_rows": "2"}'})
 
     path = ObjectPath(
@@ -154,9 +156,18 @@ async def test_openalex_loads_from_the_contracts_archived_parquet(dataset: str) 
                 object_ref=ObjectRef(path=path, generation=1),
             )
         )
+        assert await ch.tables.live_rows(dataset, "2026-10-14") == 2
     assert (table.archive, table.name, written) == (contract.archived, contract.table, 2)
     assert table.load_sql_sha256 == sql_sha256(parquet_upsert_query(contract))
-    assert queries[-1] == parquet_upsert_query(contract)
+    assert queries[-2] == parquet_upsert_query(contract)
+    settings = "\nSETTINGS max_threads = 1, max_memory_usage = 6000000000"
+    assert ("max_memory_usage = 6000000000" in queries[-2]) == (dataset == "openalex-authors")
+    suffix = settings if dataset == "openalex-authors" else ""
+    assert queries[-1] == (
+        "SELECT count() AS rows FROM {table:Identifier} FINAL "
+        "WHERE source_release = {release:Date} AND NOT removed"
+        f"{suffix} FORMAT JSONEachRow"
+    )
 
 
 async def test_a_retried_parquet_duplicates_check_keeps_its_query_id() -> None:

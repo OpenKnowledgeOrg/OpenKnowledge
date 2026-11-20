@@ -23,9 +23,9 @@ CONTRACTS: Mapping[DatasetName, DatasetContract] = MappingProxyType(
         contract.name: contract
         for contract in (
             OPENALEX_SOURCES,
-            SOURCES_FULL,
             WORKS,
             WORKS_ABSTRACTS,
+            SOURCES_FULL,
             *(contract for contract in ENTITIES if contract.name not in _WIDE),
             *(contract for contract in ENTITIES if contract.name in _WIDE),
             *WORK_PROJECTIONS,

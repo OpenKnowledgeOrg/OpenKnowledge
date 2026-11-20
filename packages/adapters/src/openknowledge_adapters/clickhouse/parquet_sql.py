@@ -172,8 +172,9 @@ _REFERENCE_ARRAYS = ("referenced_works", "related_works")
 _FULL_RECORDS = tuple(contract for name, contract in CONTRACTS.items() if name not in _PROJECTED)
 
 # Bound both the reader's prefetch and the blocks buffered for sorting and insertion.
+_WIDE_READ_SETTINGS = "max_threads = 1, max_memory_usage = 6000000000"
 _WIDE_SETTINGS = (
-    "max_threads = 1, max_download_threads = 1, "
+    f"{_WIDE_READ_SETTINGS}, max_download_threads = 1, "
     "input_format_parquet_max_block_size = 8192, "
     "input_format_parquet_prefer_block_bytes = 8388608, "
     "input_format_parquet_memory_high_watermark = 268435456"
@@ -187,6 +188,11 @@ _WIDE_INSERT_SETTINGS = (
 
 def _wide(contract: DatasetContract) -> bool:
     return contract in _FULL_RECORDS and contract.archived in {"works", "authors", "awards"}
+
+
+def wide_read_settings(contract: DatasetContract) -> str:
+    """Return a trailing SETTINGS clause for reads of wide contracts."""
+    return f"\nSETTINGS {_WIDE_READ_SETTINGS}" if _wide(contract) else ""
 
 
 def _id_pattern(prefix: str, expression: str) -> str:
@@ -263,7 +269,7 @@ def parquet_upsert_query(contract: DatasetContract, source: Source = "s3") -> st
 def parquet_removed_query(contract: DatasetContract) -> str:
     query = removed_query(contract)
     if _wide(contract):
-        return f"{query}\nSETTINGS max_threads = 1, {_WIDE_INSERT_SETTINGS}"
+        return f"{query}\nSETTINGS {_WIDE_READ_SETTINGS}, {_WIDE_INSERT_SETTINGS}"
     return query
 
 
@@ -274,6 +280,7 @@ def broken_indexes_query(contract: DatasetContract) -> str | None:
     return (
         f"SELECT countIf({BROKEN_INDEX}) AS rows FROM {identifier(contract.table)} FINAL "
         "WHERE source_release = {release:Date} AND NOT removed"
+        f"{wide_read_settings(contract)}"
     )
 
 
