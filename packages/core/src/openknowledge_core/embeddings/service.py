@@ -72,7 +72,7 @@ class EmbeddingConversion:
             if queued:
                 await jobs.delete(name)
             await jobs.wait(name)
-        converted = await _converted(self._store, self._archive, command) or []
+        converted = await _converted(self._store, self._archive, command)
         missing = [shard for shard, (_, index) in enumerate(converted) if index is None]
         name = None
         if missing:
@@ -102,7 +102,7 @@ class EmbeddingConversion:
     async def convert_shard(self, command: ConvertEmbeddingShard) -> ConvertShardResult:
         """Write the blob first and the index last, replacing what an earlier attempt left."""
         part = command.shard_part
-        entries = await _entries(self._archive, command) or ()
+        entries = await _entries(self._archive, command)
         if command.shard >= len(entries):
             raise ShardNotListed(
                 f"the {part} of {DATASET} {command.release} has {len(entries)} shards, "
@@ -219,12 +219,6 @@ class EmbeddingIndexLoad:
         for part in parts:
             shards = ConvertEmbeddings(**command.model_dump(), part=part)
             converted = await _converted(self._store, self._archive, shards)
-            if converted is None:
-                # Recording the release now would refuse the load once the archive is done.
-                raise IndexIncomplete(
-                    f"the {shards.shard_part} of {DATASET} {command.release} has no completed "
-                    "archive; archive it first"
-                )
             missing = sum(index is None for _, index in converted)
             if missing:
                 convert = "okp embeddings convert"
@@ -295,10 +289,7 @@ class EmbeddingIndexLoad:
             return b"".join([chunk async for chunk in chunks])
 
 
-async def _entries(
-    archive: ArchiveReader, command: ConvertEmbeddings
-) -> tuple[ManifestEntry, ...] | None:
-    """The shards of the completed manifest, or None while there is none."""
+async def _entries(archive: ArchiveReader, command: ConvertEmbeddings) -> tuple[ManifestEntry, ...]:
     base = DownloadDataset(
         release=command.release,
         dataset=DATASET,
@@ -311,26 +302,20 @@ async def _entries(
         else DownloadDiff(**base.model_dump(), from_release=command.from_release)
     )
     manifest = (await archive.completed_manifests(target)).get(command.shard_part)
-    return None if manifest is None else tuple(manifest.entries)
+    return () if manifest is None else tuple(manifest.entries)
 
 
 async def _converted(
     store: ArtifactStore, archive: ArchiveReader, command: ConvertEmbeddings
-) -> list[tuple[str, StoredObject | None]] | None:
-    """Each archived shard's blob name and its index, which is None until both are written.
-
-    None while the part has no completed archive.
-    """
-    entries = await _entries(archive, command)
-    if entries is None:
-        return None
+) -> list[tuple[str, StoredObject | None]]:
+    """Each archived shard's blob name and its index, which is None until both are written."""
     part = command.shard_part
     prefix = ObjectPath.under(
         command.curated_bucket, output_prefix(command.release, command.from_release, part)
     )
     present = {stored.ref.path.name: stored for stored in await store.list_objects(prefix)}
     converted: list[tuple[str, StoredObject | None]] = []
-    for entry in entries:
+    for entry in await _entries(archive, command):
         blob, index = output_names(
             command.release, command.from_release, part, entry.object_ref.path.name
         )
