@@ -95,8 +95,9 @@ class EmbeddingLocations:
                 located[row["corpusid"]] = (row["object"], row["row"])
             # After LOCATE, so a row it read that a diff inserted meanwhile shows here too.
             ahead |= {row["release"] for row in await self._client.rows(AHEAD, ids=ids, held=held)}
-        if (await self.table()).uuid != table.uuid:
-            raise IndexAhead(f"{TABLE} was replaced while it was read; look up again")
+        after = await self.table()
+        if after.uuid != table.uuid or not after.has_rows:
+            raise IndexAhead(f"{TABLE} was replaced or emptied while it was read; look up again")
         if ahead:
             raise IndexAhead(
                 f"{TABLE} has rows of {', '.join(sorted(ahead))} past the recorded {held} for "
