@@ -32,12 +32,11 @@ and evolve over time.
 
 ## Data
 
-The platform works on the full [Semantic Scholar](https://www.semanticscholar.org/product/api)
-corpus: about 255 million papers, their citation graph, abstracts and SPECTER2 embeddings.
-[OpenAlex](https://openalex.org) fills in missing abstracts. Pipelines in this repository
-archive every release in Google Cloud Storage, load it into ClickHouse and index papers into
-OpenSearch, and follow Semantic Scholar's weekly updates. See the
-[data pipeline documentation](docs/semantic-scholar.md).
+OpenKnowledge is built on open scholarly data from
+[Semantic Scholar](https://www.semanticscholar.org/product/api) and
+[OpenAlex](https://openalex.org): papers, abstracts, citations and embeddings. The
+pipelines that prepare it live in this repository; see the
+[documentation](docs/semantic-scholar.md).
 
 ## Repository layout
 
@@ -50,8 +49,7 @@ OpenSearch, and follow Semantic Scholar's weekly updates. See the
 | `migrations/clickhouse` | Database schema migrations |
 | `docs` | Detailed documentation |
 
-Dependencies point one way: `pipelines` > `adapters` > `core` > `contracts`.
-[AGENTS.md](AGENTS.md) lists the architecture rules that CI enforces.
+Architecture rules are in [AGENTS.md](AGENTS.md).
 
 ## Development
 
@@ -70,8 +68,6 @@ uv run ruff check . && uv run ruff format --check .
 uv run pyright
 uv run lint-imports
 ```
-
-End-to-end tests need Docker and are skipped without it.
 
 ## Documentation
 
