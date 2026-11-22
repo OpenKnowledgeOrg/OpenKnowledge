@@ -1,46 +1,57 @@
 # OpenKnowledge
 
-Data pipelines behind OpenKnowledge, an open-source platform for finding and surveying
-research literature. This repository archives the
-[Semantic Scholar](https://www.semanticscholar.org/product/api) and
-[OpenAlex](https://openalex.org) datasets, loads them into ClickHouse and indexes papers
-into OpenSearch for search.
+OpenKnowledge is a free, open-source tool that helps researchers understand the literature
+around a topic, find the papers relevant to their work, and see how ideas emerge, connect
+and evolve over time.
 
-```mermaid
-flowchart LR
-    S2[Semantic Scholar] --> Raw[(GCS raw bucket)]
-    OA[OpenAlex] --> Raw
-    Raw --> CH[(ClickHouse)]
-    Raw --> Vec[(GCS curated bucket: SPECTER2 vectors)]
-    CH --> OS[(OpenSearch)]
-```
+> **Status:** under active development. This repository currently holds the data foundation
+> the platform is built on. The platform's core features will move here from the
+> [prototype](https://github.com/OpenKnowledgeOrg/OpenKnowledgeMVP).
 
-- **Archive.** Every release and diff is pinned and stored as received, with checksums
-  and a manifest, so a load can always be replayed from the raw bucket.
-- **Load.** ClickHouse reads the archived files directly, checks each record against the
-  dataset's contract and records what it applied, so reruns skip finished work.
-- **Index.** Paper, abstract and TL;DR rows become one search document per paper, written
-  to a versioned index behind the `papers` alias.
+## Core features
 
-Work runs as [Prefect](https://www.prefect.io) flows; large downloads and conversions run
-as Google Cloud Batch jobs. The Google Cloud resources they run on are managed in a separate infrastructure
-repository.
+- **OK-Score.** A relevance score the researcher can tune. It weighs more than citations, for
+  example open access, released code and public reception, so it rewards reproducible work.
+- **Paper archetypes.** Each paper is classified by its main contribution, such as a new
+  method, a benchmark of existing ones, a survey, a dataset or a pipeline. Readers can tell
+  what a paper offers before they open it.
+- **OK-Graph.** A hierarchical map of a field: clusters of related work with generated titles
+  and summaries, which can be expanded into the citation chains behind them, forwards or
+  backwards in time from chosen seed papers.
+
+## Principles
+
+- **Transparency.** Discovery should not happen in a black box. Code, data sources and
+  methods are open, and the platform favours open-access literature.
+- **Comprehensiveness.** A top-down, hierarchical view gives a quick but complete picture
+  of a field before going into detail.
+- **Flexibility.** Researchers read literature in different ways, so the tool adapts to them:
+  their own search terms, score weights and starting papers.
+
+## Data
+
+The platform works on the full [Semantic Scholar](https://www.semanticscholar.org/product/api)
+corpus: about 255 million papers, their citation graph, abstracts and SPECTER2 embeddings.
+[OpenAlex](https://openalex.org) fills in missing abstracts. Pipelines in this repository
+archive every release in Google Cloud Storage, load it into ClickHouse and index papers into
+OpenSearch, and follow Semantic Scholar's weekly updates. See the
+[data pipeline documentation](docs/semantic-scholar.md).
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
-| `packages/contracts` | Pydantic models for datasets, identifiers, manifests, tables and the search document |
-| `packages/core` | Ingestion, embedding and search logic, with ports as Protocols and no framework imports |
-| `packages/adapters` | Implementations of those ports for GCS, Cloud Batch, ClickHouse, OpenSearch, Semantic Scholar and OpenAlex |
-| `pipelines` | Settings, Prefect flows, the `okp` command line and the container image |
-| `migrations/clickhouse` | Numbered ClickHouse schema migrations |
-| `tests` | Cross-package and end-to-end tests |
+| `packages/contracts` | Data models: datasets, identifiers, tables and the search document |
+| `packages/core` | Domain logic, free of frameworks and clients |
+| `packages/adapters` | Connections to storage, databases, search and data sources |
+| `pipelines` | Prefect flows and the `okp` command line |
+| `migrations/clickhouse` | Database schema migrations |
+| `docs` | Detailed documentation |
 
 Dependencies point one way: `pipelines` > `adapters` > `core` > `contracts`.
-[AGENTS.md](AGENTS.md) lists the architecture rules CI enforces.
+[AGENTS.md](AGENTS.md) lists the architecture rules that CI enforces.
 
-## Getting started
+## Development
 
 Requires Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
@@ -49,22 +60,7 @@ uv sync --all-packages --all-extras
 uv run okp --help
 ```
 
-| Command | Purpose |
-| --- | --- |
-| `okp s2` | Pin, download, archive, load and sync Semantic Scholar datasets |
-| `okp openalex` | Pin, archive and load OpenAlex snapshots |
-| `okp embeddings` | Convert SPECTER2 vectors and look them up by corpus ID |
-| `okp search` | Queue the paper indexing run |
-| `okp serve`, `okp serve-index` | Serve the Prefect deployments on the control and OpenSearch VMs |
-| `okp admission` | Open and close the deployment admission gate |
-
-Settings come from the environment: `S2_API_KEY`, and `OKP_` followed by a field name from
-[`settings.py`](pipelines/src/openknowledge_pipelines/settings.py). Commands that change
-data need the shared Prefect server (`PREFECT_API_URL`) and an open admission gate.
-
-## Development
-
-Run these before opening a pull request; CI runs the same checks:
+Run the checks before opening a pull request; CI runs the same ones:
 
 ```sh
 uv run pytest -q
@@ -73,19 +69,15 @@ uv run pyright
 uv run lint-imports
 ```
 
-End-to-end tests start ClickHouse, OpenSearch, Prefect and a fake GCS from
-[`tests/e2e/compose.yaml`](tests/e2e/compose.yaml) and are skipped locally without
-Docker. SQL tests are skipped without a `clickhouse` binary on the `PATH`.
+End-to-end tests need Docker and are skipped without it.
 
 ## Documentation
 
-- [Semantic Scholar archives](docs/semantic-scholar.md): local and Batch downloads,
-  full-text and SPECTER2 archives, the coordinated sync
-- [Loading into ClickHouse](docs/clickhouse.md): loads, diffs, migrations, read tables,
-  OpenAlex, watchdog
+- [Semantic Scholar archives](docs/semantic-scholar.md)
+- [Loading into ClickHouse](docs/clickhouse.md)
 - [SPECTER2 vector lookup](docs/embeddings.md)
 - [Indexing papers into OpenSearch](docs/search-indexing.md)
-- [Deployment](docs/deployment.md): the pipelines image and deployment admission
+- [Deployment](docs/deployment.md)
 
 ## License
 
