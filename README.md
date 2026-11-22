@@ -323,12 +323,13 @@ The `lowercase` keyword normalizer makes filters on `venue`, `journal.name`, `s2
 A keyword value longer than 8191 characters stays in `_source` but is not indexed, since OpenSearch refuses a term over 32766 bytes.
 Changing the mapping means building a new index.
 Parts are Prefect tasks with bounded concurrency. `OKP_INDEX_BASE_PARTS` defaults to 256,
-`OKP_INDEX_DIFF_PARTS` to 18, and `OKP_INDEX_PARALLELISM` to 2. The roughly 255M papers
+`OKP_INDEX_DIFF_PARTS` to 36, and `OKP_INDEX_PARALLELISM` to 2. The roughly 255M papers
 and 50M abstracts need about 1M papers per part: ClickHouse hashes a join side whole.
-Diff joins read touched keys, so 18 parts target about 1M changed documents per part for a
+Diff joins read touched keys, so 36 parts target about 0.5M changed documents per part for a
 weekly diff of 17–18M documents. Corpus ID distribution can be uneven; tune parts and
 parallelism to the VM's memory. Each part streams into bulk requests of about 5 MB.
 ClickHouse's `http_send_timeout` must allow for a stalled bulk request (30 seconds by default).
+It is read from the server's default profile at startup; a per-query value has no effect.
 
 The `indexed` table stores frozen bounds, source UUIDs, contract version and completed parts.
 A failed base leaves an unpublished partial index; a failed diff can leave some live documents
