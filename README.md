@@ -338,8 +338,9 @@ receipt and applied-state reads for planning take none.
 Ordinary search exceptions release the slot, since requests are awaited and writes are idempotent.
 Cancellation or uncertain admission still requires operator reconciliation as described below.
 When a deploy closes admission, running parts drain and the next part is refused, failing the run.
-Rerun after the deploy to skip successful parts; a changed part count replans every part,
-so change `OKP_INDEX_DIFF_PARTS` (or its default) only between diffs. An unfinished base resumes at its own release
+Rerun after the deploy to skip successful parts. A changed part count replans every part of an
+unfinished diff on the same index; that is safe, but replays the whole diff, so prefer changing
+`OKP_INDEX_DIFF_PARTS` (or its default) between diffs unless parts keep failing. An unfinished base resumes at its own release
 while contract, source UUIDs and part count match, even if applied has advanced. Once complete,
 the next run diffs it to the applied release. No old index is deleted. Indexing holds no `clickhouse`
 limit, so loads can continue. Rows changed during a read are sent again by the next pass.
