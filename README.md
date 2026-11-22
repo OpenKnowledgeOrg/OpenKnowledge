@@ -4,6 +4,8 @@ OpenKnowledge is a free, open-source tool that helps researchers understand the 
 around a topic, find the papers relevant to their work, and see how ideas emerge, connect
 and evolve over time.
 
+**Website: [openknowledgehub.app](https://openknowledgehub.app)**
+
 > **Status:** under active development. This repository currently holds the data foundation
 > the platform is built on. The platform's core features will move here from the
 > [prototype](https://github.com/OpenKnowledgeOrg/OpenKnowledgeMVP).
