@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
+from openknowledge_adapters.clickhouse.crosswalk import TITLE_SCRATCH
 from openknowledge_adapters.clickhouse.read_tables import (
     BYTES_PER_CITATION,
     BYTES_PER_SCRATCH_KEY,
@@ -44,6 +45,8 @@ FULL, INCREMENTAL, CURRENT = ReadTablesPath.FULL, ReadTablesPath.INCREMENTAL, Re
     ("limit", "ratio", "cores", "memory", "threads"),
     [
         (14_760_000_000, 0.9, 2, 8 * 10**9, 2),
+        # e2-highmem-4: 28 GiB server limit.
+        (30_064_771_072, 0.9, 4, 16 * 10**9, 4),
         (230_400_000_000, 0.9, 64, 128 * 10**9, 32),
         (230_400_000_000, 0.9, 8, 128 * 10**9, 8),
         # An explicit cap below ratio x RAM: stay under the server's own limit.
@@ -218,6 +221,8 @@ class FakeClickHouse:
             rows = [{"rows": self.ahead.get(query.split()[5], 0)}]
         elif query.startswith("SELECT count() AS rows FROM"):
             rows = [{"rows": self.counts.get(query.split()[5], 100)}]
+        elif query.startswith("SELECT count() AS candidates"):
+            rows = [{"candidates": 50, "taken": 5, "matched": 10}]
         elif "FROM system.columns" in query and OUT in query:
             rows = [{"table": table} for table in sorted(self.columns)]
         elif "FROM system.columns" in query:
@@ -247,7 +252,8 @@ class FakeClickHouse:
             assert self.replaced == {"citation-edges", "read-tables-delete"}
             name = query.removesuffix(" SYNC").split()[-1]
             # DROP ... SYNC after an insert hangs in ClickHouse 26.8, so scratch keys never wait.
-            assert name.endswith("_new") or (name in DELTA.values() and not query.endswith("SYNC"))
+            scratch = (*DELTA.values(), *TITLE_SCRATCH)
+            assert name.endswith("_new") or (name in scratch and not query.endswith("SYNC"))
             self.staging.pop(name, None)
             rows = []
         elif query.startswith("CREATE TABLE"):
@@ -275,6 +281,8 @@ class FakeClickHouse:
             assert "max_bytes_before_external_group_by = 64000000000" in query
             if source is not None:
                 written = self.counts[name] = self.touched[source]
+            elif name in TITLE_SCRATCH:
+                written = 50
             elif name.endswith("_new"):
                 written = 100
             else:
@@ -697,6 +705,19 @@ async def test_openalex_group_rebuilds_alone_and_records_its_release(
             assert found["target_uuid"] == str(server.live[table])
         assert f"DROP TABLE IF EXISTS {DELTA['openalex']}" in server.events
         assert result.source_releases["openalex_works"] == "2027-01-13"
+        # The title matches follow the ID insert; their scratch goes before the abstracts.
+        assert in_order(
+            server.events,
+            [
+                f"INSERT INTO {XWALK}_new ",
+                *(f"INSERT INTO {table} " for table in TITLE_SCRATCH),
+                f"INSERT INTO {XWALK}_new ",
+                "SELECT count() AS candidates",
+                *(f"DROP TABLE IF EXISTS {table}" for table in TITLE_SCRATCH),
+                f"INSERT INTO {BEST}_new ",
+            ],
+        )
+        assert result.tables[XWALK].rows == 200
     elif case == "papers_diff":
         assert result.paths == {
             "papers": INCREMENTAL,

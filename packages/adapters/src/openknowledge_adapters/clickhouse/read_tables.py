@@ -10,9 +10,12 @@ from pydantic import TypeAdapter
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.crosswalk import (
     BEST_COLUMNS,
+    TITLE_SCRATCH,
     XWALK_COLUMNS,
     best_select,
     expansion_sql,
+    title_sql,
+    title_stats_sql,
     xwalk_select,
 )
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
@@ -81,6 +84,8 @@ BYTES_PER_PAPER = 100
 """Provisional free disk per papers row, pending a measured build."""
 BYTES_PER_XWALK = 40
 """Provisional free disk per papers row, pending a measured build."""
+BYTES_PER_TITLE_SCRATCH = 24
+"""(8 + 8 + 5 + 4 + 1) bytes per papers row of the title matching's scratch, uncompressed."""
 BYTES_PER_ABSTRACT = 1000
 """Provisional free disk per papers row, pending a measured build: at most one abstract per live
 paper, however many OpenAlex abstracts or unmerged versions the sources hold."""
@@ -184,7 +189,9 @@ def delta_sql(
         f"INSERT INTO {delta} (key, expanded) SELECT DISTINCT key, false FROM ({sources}) "
         f"WHERE key NOT IN (SELECT key FROM {delta} WHERE NOT expanded) "
         f"LIMIT {max_keys + 1} {_settings(budget, single_thread=True)}",
-        f"INSERT INTO {delta} (key, expanded) SELECT corpusid, true FROM ({expansion_sql(delta)}) "
+        # A paper losing its title match is rebuilt like a delta key, abstract included.
+        f"INSERT INTO {delta} (key, expanded) SELECT corpusid, NOT by_title "
+        f"FROM ({expansion_sql(delta)}) "
         f"{_settings(budget)}, {GRACE_HASH}",
     ]
 
@@ -293,6 +300,8 @@ class ClickHouseReadTables:
         for group, table in DELTA.items():
             if group not in KEPT_DELTA:
                 await self._client.post(f"DROP TABLE IF EXISTS {table}")
+        for table in TITLE_SCRATCH:
+            await self._client.post(f"DROP TABLE IF EXISTS {table}")
 
     async def _build_budget(self) -> ReadTableBudget:
         rows = await self._client.rows(
@@ -588,6 +597,13 @@ class ClickHouseReadTables:
                 touched * BYTES_PER_KEY[source] + DELTA_HEADROOM,
                 f"updating the {source} read tables",
             )
+            if XWALK in tables:
+                lost = await self._client.rows(
+                    f"SELECT count() AS rows FROM {XWALK} WHERE match_key = 'title' "
+                    f"AND corpusid IN (SELECT key FROM {DELTA[source]}) {_settings(budget)}"
+                )
+                # An update matches by ID only; the next full build matches them again.
+                log.info("the update drops %s title matches", lost[0]["rows"])
         async with self._stage(f"read tables: {source} apply"):
             written: dict[str, int] = {}
             for statement in apply_sql(source, budget):
@@ -639,6 +655,8 @@ class ClickHouseReadTables:
                     f"{_settings(budget)}, {BLOCKS[table]}",
                     query_id=QUERY_ID,
                 )
+                if table == XWALK:
+                    rows += await self._titles(budget)
                 results[table] = ReadTableResult(rows=rows, seconds=monotonic() - started)
         async with self._stage("read tables: validate counts"):
             if "citations" in groups and results[IN].rows != results[OUT].rows:
@@ -697,6 +715,26 @@ class ClickHouseReadTables:
             paths=dict.fromkeys(groups, ReadTablesPath.FULL),
             touched=dict(touched or {}),
         )
+
+    async def _titles(self, budget: ReadTableBudget) -> int:
+        """Add the title matches to the crosswalk copy; return the rows added."""
+        target = f"{XWALK}_new"
+        rows = 0
+        for statement in title_sql(target, f"{_settings(budget)}, {BLOCKS[XWALK]}"):
+            written = await self._run(statement)
+            if statement.startswith(f"INSERT INTO {target} "):
+                rows += written
+        stats = (await self._client.rows(f"{title_stats_sql(target)} {_settings(budget)}"))[0]
+        log.info(
+            "title matching: %s candidates, %s on a work an ID match took (likely duplicate "
+            "papers), %s matched",
+            stats["candidates"],
+            stats["taken"],
+            stats["matched"],
+        )
+        for table in TITLE_SCRATCH:
+            await self._client.post(f"DROP TABLE IF EXISTS {table}")
+        return rows
 
     async def _run(self, statement: str) -> int:
         """Run under the kind's fixed query ID, which a rerun replaces; return rows inserted."""
@@ -768,7 +806,7 @@ class ClickHouseReadTables:
         per_row = {
             "papers": {"papers": BYTES_PER_PAPER},
             "citations": {"citations": BYTES_PER_CITATION},
-            "openalex": {"papers": BYTES_PER_XWALK + BYTES_PER_ABSTRACT},
+            "openalex": {"papers": BYTES_PER_XWALK + BYTES_PER_TITLE_SCRATCH + BYTES_PER_ABSTRACT},
         }
         await self._require_free(
             sum(
