@@ -50,6 +50,8 @@ jobs:
     if: github.event_name == 'push' && github.repository == 'OpenKnowledgeOrg/OpenKnowledge'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     permissions:
       contents: read
       id-token: write # workload identity federation, to push to Artifact Registry
@@ -115,3 +117,130 @@ jobs:
             echo
             echo "Pin deployments to \`${IMAGE}@${DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Opens or updates one rolling pull request in Infra that pins the new image.
+  # Skipped until the INFRA_PIN_APP_ID variable names the GitHub App.
+  pin:
+    needs: publish
+    if: github.event_name == 'push' && vars.INFRA_PIN_APP_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app
+        with:
+          client-id: ${{ vars.INFRA_PIN_APP_ID }}
+          private-key: ${{ secrets.INFRA_PIN_APP_PRIVATE_KEY }}
+          owner: OpenKnowledgeOrg
+          repositories: OpenKnowledgeInfra
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: hub
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: OpenKnowledgeOrg/OpenKnowledgeInfra
+          ref: main
+          path: infra
+          token: ${{ steps.app.outputs.token }}
+      - name: Open or update the pin pull request
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          head=$(git -C hub ls-remote origin refs/heads/main | cut -f1)
+          [ -n "$head" ] || { echo "::error::could not read the head of main"; exit 1; }
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::notice::main has moved past ${GITHUB_SHA}; its own run pins the newer image"
+            exit 0
+          fi
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::bad digest '$DIGEST'"; exit 1; }
+          new=${GITHUB_SHA::7}
+          cd infra
+          # shellcheck disable=SC2016
+          pattern='The checked-in digest is the image of Hub `([0-9a-f]+)`'
+          old=$(sed -nE "s/.*${pattern}.*/\1/p" README.md)
+          [ -n "$old" ] || { echo "::error::README has no checked-in digest line"; exit 1; }
+          sed -Ei "s/${pattern}/The checked-in digest is the image of Hub \`${new}\`/" README.md
+          for file in deploy/control/compose.yaml deploy/search/compose.yaml; do
+            sed -Ei "/pipelines@sha256:|OKP_IMAGE_DIGEST:/ s/sha256:[0-9a-f]{64}/${DIGEST}/" "$file"
+            changed=$(git diff --numstat -- "$file" | cut -f1,2)
+            if [ "$(grep -c "$DIGEST" "$file")" != 2 ] || { [ -n "$changed" ] && [ "$changed" != "$(printf '2\t2')" ]; }; then
+              echo "::error::expected exactly the two pipelines pins to change in $file"
+              exit 1
+            fi
+          done
+          if git diff --quiet; then
+            echo "Infra already pins $DIGEST"
+            exit 0
+          fi
+
+          cd ../hub
+          {
+            echo "## What changes"
+            echo "Control and search run the pipelines image of Hub ${new} (\`${DIGEST}\`), replacing Hub ${old}."
+            echo "Hub changes: https://github.com/${GITHUB_REPOSITORY}/compare/${old}...${GITHUB_SHA}"
+            echo
+            echo "## Cost"
+            echo "None."
+            echo
+            echo "## Before merge"
+            echo "Merging deploys this image: the Infra rollout starts on the merge, after its preflight. Check before merging:"
+            echo "- no search diff is unfinished (the preflight refuses one too)"
+            echo "- not within a few hours of the Saturday 00:30 UTC S2 sync"
+            echo "- the migration and part-count notes below"
+            echo "- VM resizes and secrets go in separate changes"
+            echo
+            if base=$(git rev-parse --verify --quiet "${old}^{commit}"); then
+              highest=$(git ls-tree --name-only "$base" migrations/clickhouse/ | sed -nE 's|.*/([0-9]+)_.*|\1|p' | sort -n | tail -1)
+              echo "### Migrations"
+              changes=$(git diff --name-status "$base" "$GITHUB_SHA" -- migrations/clickhouse)
+              [ -n "$changes" ] || echo "None."
+              while read -r status path rest; do
+                [ -n "$status" ] || continue
+                number=$(basename "${rest:-$path}" | sed -nE 's/^([0-9]+)_.*/\1/p')
+                note=""
+                if [ "$status" != A ]; then
+                  note=" **(changes an existing migration)**"
+                elif [ -n "$number" ] && [ -n "$highest" ] && [ $((10#$number)) -le $((10#$highest)) ]; then
+                  note=" **(numbered at or below ${highest}, the highest in ${old})**"
+                fi
+                echo "- \`${status}\` ${path}${rest:+ → $rest}${note}"
+              done <<< "$changes"
+              echo
+              echo "### Part count"
+              parts=$(git diff -U0 "$base" "$GITHUB_SHA" -- pipelines/src/openknowledge_pipelines/settings.py | grep -E '^[-+][^-+].*index_(diff|base)_parts' || true)
+              if [ -n "$parts" ]; then
+                echo "Changed in settings.py; \`OKP_INDEX_DIFF_PARTS\` in the search VM's .env overrides the diff default:"
+                echo '```diff'
+                echo "$parts"
+                echo '```'
+              else
+                echo "Unchanged."
+              fi
+            else
+              echo "Could not compare migrations and part count: Hub ${old} does not resolve."
+            fi
+          } > "$RUNNER_TEMP/body.md"
+
+          cd ../infra
+          user_id=$(gh api "users/${APP_SLUG}%5Bbot%5D" --jq .id)
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          title="Pin the image of Hub ${new}"
+          git switch -C hub-pin
+          git commit -qam "$title"
+          # The open PR gets its new title and hazards before the new digest, so a failure never pairs them wrongly.
+          number=$(gh pr list --head hub-pin --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+            git push --force origin hub-pin
+          else
+            git push --force origin hub-pin
+            gh pr create --base main --head hub-pin --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          fi
