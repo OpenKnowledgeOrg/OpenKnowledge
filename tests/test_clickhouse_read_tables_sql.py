@@ -10,18 +10,22 @@ import pytest
 
 from openknowledge_adapters.clickhouse.crosswalk import (
     BEST_COLUMNS,
+    MAX_TITLE_WORKS,
     XWALK_COLUMNS,
     best_select,
+    title_sql,
     xwalk_select,
 )
 from openknowledge_adapters.clickhouse.read_tables import (
     COLUMNS,
     DELTA,
+    GRACE_HASH,
     IN,
     KEY,
     OUT,
     PAPERS,
     SOURCES,
+    XWALK,
     apply_sql,
     build_budget,
     delta_sql,
@@ -68,10 +72,15 @@ def test_edge_rebuild_preserves_live_citation_ids(tmp_path: Path) -> None:
 S2_TABLES = GROUPS["papers"] + GROUPS["citations"]
 
 
+def _titles(xwalk: str) -> str:
+    return "".join(f"{statement};\n" for statement in title_sql(xwalk, f"SETTINGS {GRACE_HASH}"))
+
+
 def _full_build(suffix: str, tables: tuple[str, ...] = S2_TABLES) -> str:
     return "".join(
         f"CREATE TABLE {table}{suffix} AS {table};\n"
         f"INSERT INTO {table}{suffix} ({COLUMNS[table]}) {SOURCES[table]};\n"
+        + (_titles(f"{table}{suffix}") if table == XWALK else "")
         for table in tables
     )
 
@@ -431,4 +440,204 @@ def test_search_leaves_out_abstracts_of_shared_works(query: str, tmp_path: Path)
         1: None,
         2: "S2 two",
         3: "OA three",
+    }
+
+
+# Titles of at least 20 characters once normalised, each its own block.
+TITLES = {key: f"a study of case {key} in depth" for key in range(1, 30)}
+
+
+def _paper(corpusid: int, key: int | None, year: int | None, doi: str | None = None) -> str:
+    title = "" if key is None else TITLES[key].title()
+    ids = f"{{'DOI': '{doi}'}}" if doi else "{}"
+    return f"({corpusid}, {ids}, '{title}', {'NULL' if year is None else year}, '2026-10-01', 0)"
+
+
+def _work(
+    work_id: int,
+    key: int,
+    year: int | None,
+    kind: str | None = "article",
+    *,
+    xpac: bool = False,
+    doi: str | None = None,
+    paratext: bool = False,
+) -> str:
+    return (
+        f"({work_id}, {f"'{doi}'" if doi else 'NULL'}, '{TITLES[key].upper()}.', "
+        f"{'NULL' if year is None else year}, {'NULL' if kind is None else f"'{kind}'"}, "
+        f"{int(xpac)}, {int(paratext)}, 1, 0, '2026-10-01', 0)"
+    )
+
+
+PAPER_COLUMNS = "corpusid, externalids, title, year, source_release, is_deleted"
+WORK_COLUMNS = (
+    "work_id, doi_norm, title, publication_year, type, is_xpac, is_paratext, has_abstract, "
+    "removed, source_release, is_deleted"
+)
+
+
+@needs_clickhouse
+def test_title_matches_take_unique_free_works_only(tmp_path: Path) -> None:
+    long_title = "a much longer title of forty characters or more"
+    papers = [
+        _paper(1, 1, 2020),  # unique title, year one apart: matched
+        _paper(2, 2, 2020),  # two works in the window
+        _paper(3, 3, 2019),  # two papers in the work's window
+        _paper(4, 3, 2021),
+        _paper(5, 4, 2020),  # another paper of the title holds a DOI match
+        _paper(6, 4, 2020, doi="10.1/six"),
+        _paper(7, 5, 2020),  # generic: more than MAX_TITLE_WORKS works, all years apart
+        _paper(8, 6, 2020),  # serial: works in three years
+        _paper(9, 7, 2020),  # the work is taken by an ID match
+        _paper(10, 29, 2020, doi="10.1/ten"),
+        _paper(11, 8, 2020),  # non-XPAC work beside an XPAC one: matched to the non-XPAC
+        _paper(12, 9, 2020),  # only one XPAC work: matched
+        _paper(13, 10, 2020),  # two XPAC works
+        _paper(14, 11, 2020),  # data deposits, paratext and a dataset copy are ignored
+        _paper(16, 13, 2020),  # year two apart
+        _paper(17, 14, 2020),  # NULL type and another year
+        _paper(18, 15, 2020),  # 'other' type, same year: matched
+        _paper(19, 16, 2020, doi="10.1/nineteen"),  # has an ID candidate already
+        _paper(21, 18, None),  # no year and a title under 40 characters
+        _paper(22, 21, 2020, doi="10.1/twentytwo"),  # an ID match: no title match on top
+        _paper(23, 23, 2020),  # empty-string type and another year
+        _paper(24, 24, 2020),  # empty-string type, same year: matched
+        "(15, {}, 'Short Title', 2020, '2026-10-01', 0)",  # under 20 characters
+        f"(20, {{}}, '{long_title.title()}', NULL, '2026-10-01', 0)",  # no year: matched
+    ]
+    works = [
+        _work(101, 1, 2021),
+        _work(201, 2, 2020),
+        _work(202, 2, 2021),
+        _work(301, 3, 2020),
+        _work(401, 4, 2020),
+        _work(402, 28, 2020, doi="10.1/six"),
+        _work(501, 5, 2020),
+        _work(601, 6, 2016),
+        _work(602, 6, 2018),
+        _work(603, 6, 2020),
+        _work(701, 7, 2020, doi="10.1/ten"),
+        _work(801, 8, 2020, xpac=True),
+        _work(802, 8, 2020),
+        _work(901, 9, 2021, xpac=True),
+        _work(1001, 10, 2020, xpac=True),
+        _work(1002, 10, 2020, xpac=True),
+        _work(1101, 11, 2020),
+        _work(1102, 11, 2020, "dataset"),
+        _work(1103, 11, 2020, doi="10.5281/zenodo.1"),
+        _work(1104, 11, 2020, doi="10.6084/m9.figshare.1"),
+        _work(1105, 11, 2020, doi="10.17632/abc.1"),
+        _work(1106, 11, 2020, paratext=True),
+        _work(1301, 13, 2018),
+        _work(1401, 14, 2021, None),
+        _work(1501, 15, 2020, "other"),
+        _work(1601, 16, 2020, doi="10.1/nineteen"),
+        _work(1602, 16, 2020),
+        _work(1801, 18, 2020),
+        _work(2101, 21, 2020),
+        _work(2201, 22, 2020, doi="10.1/twentytwo"),
+        _work(2301, 23, 2021, ""),
+        _work(2401, 24, 2020, ""),
+        _work(15010, 1, None),  # no year: outside every dated window
+        "(150, NULL, 'Short title', 2020, 'article', 0, 0, 1, 0, '2026-10-01', 0)",
+        f"(2001, NULL, '{long_title}', 2010, 'article', 0, 0, 1, 0, '2026-10-01', 0)",
+    ]
+    sql = f"""
+        {up()}
+        INSERT INTO papers ({PAPER_COLUMNS}) VALUES {", ".join(papers)};
+        INSERT INTO openalex_works ({WORK_COLUMNS}) VALUES {", ".join(works)};
+        INSERT INTO openalex_works ({WORK_COLUMNS})
+        SELECT 50000 + number, NULL, '{TITLES[5]}', 1900, 'article', 0, 0, 1, 0, '2026-10-01', 0
+        FROM numbers({MAX_TITLE_WORKS});
+        {_full_build("_new", (XWALK,))}
+        SELECT corpusid, work_id, match_key, rank, chosen, shared_work FROM paper_xwalk_new
+        ORDER BY corpusid, rank FORMAT JSONEachRow;
+    """
+    rows = [tuple(row.values()) for row in clickhouse_local(sql, tmp_path)]
+    assert rows == [
+        (1, 101, "title", 1, True, False),
+        (6, 402, "doi", 1, True, False),
+        (10, 701, "doi", 1, True, False),
+        (11, 802, "title", 1, True, False),
+        (12, 901, "title", 1, True, False),
+        (14, 1101, "title", 1, True, False),
+        (18, 1501, "title", 1, True, False),
+        (19, 1601, "doi", 1, True, False),
+        (20, 2001, "title", 1, True, False),
+        (22, 2201, "doi", 1, True, False),
+        (24, 2401, "title", 1, True, False),
+    ]
+
+
+@needs_clickhouse
+def test_an_update_drops_a_title_match_whose_work_an_id_match_takes(tmp_path: Path) -> None:
+    run = [
+        *delta_sql("openalex", "2026-10-01", "2026-10-02", 100, BUDGET),
+        *apply_sql("openalex", BUDGET, "2026-10-02"),
+    ]
+    statements = ";\n".join([*run[:-1], *run, *run])
+    group = GROUPS["openalex"]
+    sql = f"""
+        {up()}
+        SYSTEM STOP MERGES papers;
+        INSERT INTO papers ({PAPER_COLUMNS})
+        VALUES {_paper(1, 1, 2020)}, {_paper(2, 2, 2020)}, {_paper(3, 3, 2020)};
+        INSERT INTO openalex_works ({WORK_COLUMNS})
+        VALUES {_work(10, 1, 2020)}, {_work(20, 2, 2020, doi="10.1/d20")}, {_work(30, 3, 2020)};
+        INSERT INTO openalex_abstracts (work_id, abstract, source_release, is_deleted)
+        VALUES (10, 'OA ten', '2026-10-01', 0), (20, 'OA twenty', '2026-10-01', 0),
+               (30, 'OA thirty', '2026-10-01', 0);
+        {_full_build("_new", group)}
+        {_publish(group)}
+        SELECT corpusid, work_id, match_key FROM paper_xwalk ORDER BY corpusid FORMAT JSONEachRow;
+        INSERT INTO papers ({PAPER_COLUMNS})
+        VALUES (4, {{'DOI': '10.1/d20'}}, 'Another Title Of Some Length', 2020, '2026-10-02', 0);
+        {statements};
+        {_full_build("_new", group)}
+        {_compare(group)}
+    """
+    rows = clickhouse_local(sql, tmp_path)
+    before = [(row["corpusid"], row["work_id"], row["match_key"]) for row in rows[:3]]
+    assert before == [(1, 10, "title"), (2, 20, "title"), (3, 30, "title")]
+    copies: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows[3:]:
+        copies[row.pop("copy")].append(row)
+    # Paper 4 takes work 20 by DOI, so paper 2 loses it and its abstract, as in a full build.
+    for table in group:
+        assert copies[table] == copies[f"{table}_new"], table
+    assert [(r["corpusid"], r["work_id"], r["match_key"]) for r in copies[XWALK]] == [
+        (1, 10, "title"),
+        (3, 30, "title"),
+        (4, 20, "doi"),
+    ]
+    assert [(r["corpusid"], r["work_id"]) for r in copies["paper_abstract_best"]] == [
+        (1, 10),
+        (3, 30),
+        (4, 20),
+    ]
+    # The weekly search diff must also pick up displaced paper 2 so its stale abstract is cleared.
+    diff_sql = f"""
+        {up()}
+        SYSTEM STOP MERGES papers;
+        INSERT INTO papers ({PAPER_COLUMNS})
+        VALUES {_paper(1, 1, 2020)}, {_paper(2, 2, 2020)}, {_paper(3, 3, 2020)};
+        INSERT INTO openalex_works ({WORK_COLUMNS})
+        VALUES {_work(10, 1, 2020)}, {_work(20, 2, 2020, doi="10.1/d20")}, {_work(30, 3, 2020)};
+        INSERT INTO openalex_abstracts (work_id, abstract, source_release, is_deleted)
+        VALUES (10, 'OA ten', '2026-10-01', 0), (20, 'OA twenty', '2026-10-01', 0),
+               (30, 'OA thirty', '2026-10-01', 0);
+        {_full_build("_new", group)}
+        {_publish(group)}
+        INSERT INTO papers ({PAPER_COLUMNS})
+        VALUES (4, {{'DOI': '10.1/d20'}}, 'Another Title Of Some Length', 2020, '2026-10-02', 0);
+        {";\n".join(run)};
+        {DIFF_QUERY} FORMAT JSONEachRow;
+    """
+    diff_rows = clickhouse_local(
+        diff_sql, tmp_path / "diff", low="0", high="9", from_release="2026-10-01"
+    )
+    assert {row["corpusid"]: row["best_abstract"] for row in diff_rows} == {
+        2: None,
+        4: "OA twenty",
     }

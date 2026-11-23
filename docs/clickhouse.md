@@ -72,6 +72,14 @@ OpenAlex work, with `source` saying which. It takes the papers and abstracts dif
 earlier of their two releases; until abstracts holds a release, the group is skipped.
 Migration 00026 makes `openalex_works.is_retracted` nullable: OpenAlex leaves it empty for some works,
 and the load keeps that as NULL instead of refusing the file.
+Migration 00053 adds the `title` match key (and `paper_abstract_best_invalidations` so weekly
+search diffs rewrite papers whose title match is displaced by a new ID match). A full build of the
+group then matches papers with no ID candidate to a work no paper chose, by equal normalised title
+(20+ characters) and a year at most one apart, or a 40+ character title for a paper without a year.
+The work must be the only eligible one in the paper's window and the paper the only live paper in
+the work's; generic and serial titles, data deposits, datasets, paratext, peer reviews, errata and
+retractions never match. An update matches by ID only: a paper it touches loses its title match
+until the next full build. Roll back 00053 only after a build without title matches.
 The `openalex-load` deployment builds the read tables right after its load, and the search index
 follows each of its runs; a failed build leaves the load applied for the next sync to build from.
 `openalex-release-check` (Mondays 04:00 Europe/Zurich) archives and loads OpenAlex's release until

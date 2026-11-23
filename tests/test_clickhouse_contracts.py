@@ -37,6 +37,7 @@ DERIVED = {
     "citation_edges_in",
     "paper_xwalk",
     "paper_abstract_best",
+    "paper_abstract_best_invalidations",
     "paper_embedding_locations",
 }
 
@@ -334,3 +335,28 @@ def test_edge_citationid_upgrade_and_rollback_preserve_existing_edges(tmp_path: 
         {"name": "citationid"},
         {"citing": 1, "cited": 2, "isinfluential": False, "intents": 0},
     ]
+
+
+@needs_clickhouse
+def test_paper_xwalk_title_key_upgrade_and_refused_rollback(tmp_path: Path) -> None:
+    migration = MIGRATIONS / "00053_add_paper_xwalk_title_key.sql"
+    upgrade, downgrade = section(migration, "Up"), section(migration, "Down")
+    select = "SELECT corpusid, match_key FROM paper_xwalk ORDER BY corpusid FORMAT JSONEachRow;"
+    sql = f"""
+        {section(MIGRATIONS / "00024_create_paper_xwalk.sql", "Up")}
+        INSERT INTO paper_xwalk (corpusid, work_id, match_key, rank, chosen, shared_work)
+        VALUES (1, 10, 'mag', 1, 1, 0);
+        {upgrade}
+        {upgrade}
+        {downgrade}
+        {upgrade}
+        INSERT INTO paper_xwalk (corpusid, work_id, match_key, rank, chosen, shared_work)
+        VALUES (2, 20, 'title', 1, 1, 0);
+        {select}
+    """
+    existing = [{"corpusid": 1, "match_key": "mag"}, {"corpusid": 2, "match_key": "title"}]
+    assert clickhouse_local(sql, tmp_path) == existing
+    refused = run(downgrade, tmp_path)
+    assert refused.returncode != 0
+    assert "paper_xwalk holds title matches; rollback refused" in refused.stderr
+    assert clickhouse_local(select, tmp_path) == existing

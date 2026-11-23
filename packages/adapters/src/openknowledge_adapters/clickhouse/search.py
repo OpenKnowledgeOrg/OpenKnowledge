@@ -113,6 +113,8 @@ WITH touched AS (
     SELECT corpusid FROM abstracts WHERE {_RANGE} AND {_AFTER}
     UNION DISTINCT
     SELECT corpusid FROM tldrs WHERE {_RANGE} AND {_AFTER}
+    UNION DISTINCT
+    SELECT corpusid FROM paper_abstract_best_invalidations WHERE {_RANGE} AND {_AFTER}
 )
 SELECT touched.corpusid AS corpusid, {_PROJECTION}
 FROM touched
