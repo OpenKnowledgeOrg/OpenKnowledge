@@ -155,15 +155,15 @@ def title_sql(xwalk: str, settings: str) -> list[str]:
     """Statements adding exact-title matches to ``xwalk``, which holds every ID candidate.
 
     Only papers without any candidate are matched, each to at most one work (rank 1), which no
-    paper chose yet. A paper matches a work of equal normalised title, compared by its 64-bit
-    hash, and a year at most one apart; a paper without a year matches across all years with
-    a longer title. Its window must hold exactly one eligible work, a non-XPAC one, or else one
-    XPAC work; the work's window must hold no other live paper of that title, matched or not.
-    Generic and serial titles, data deposits, paratext and a few types never match, and a work
-    of no clear type needs the same year.
+    paper chose yet. A paper matches a work of equal normalised title (partitioned by its 64-bit
+    hash and verified by string equality) and a year at most one apart; a paper without a year
+    matches across all years with a longer title. Its window must hold exactly one eligible work,
+    a non-XPAC one, or else one XPAC work; the work's window must hold no other live paper of
+    that title, matched or not. Generic and serial titles, data deposits, paratext and a few
+    types never match, and a work of no clear type needs the same year.
 
-    Every set tested with IN holds title hashes or works of unmatched papers only; the large
-    sides are joined, so ``settings`` should use ``grace_hash``.
+    Every large lookup is expressed as a join rather than an ``IN`` set (which cannot spill in
+    ClickHouse 26.8), so ``settings`` should use ``grace_hash``.
     """
     eligible = " AND ".join(
         [
@@ -174,76 +174,91 @@ def title_sql(xwalk: str, settings: str) -> list[str]:
     )
     titled = f"{title_norm('title')} AS title_norm"
     kept_titles = (
-        f"SELECT th FROM {TITLE_WORKS} GROUP BY th "
+        f"SELECT th, title_norm FROM {TITLE_WORKS} GROUP BY th, title_norm "
         f"HAVING count() <= {MAX_TITLE_WORKS} AND uniqExactIf(year, eligible) < {SERIAL_YEARS}"
     )
     pairs = (
-        "SELECT p.corpusid AS corpusid, p.th AS th, p.year AS year, w.work_id AS work_id, "
-        "w.year AS work_year, w.is_xpac AS is_xpac, w.unclear AS unclear "
-        f"FROM (SELECT th, work_id, year, is_xpac, unclear FROM {TITLE_WORKS} "
-        f"WHERE eligible AND th IN ({kept_titles})) AS w "
-        f"INNER JOIN (SELECT corpusid, th, year FROM {TITLE_PAPERS} WHERE unmatched AND {_LONG}) "
-        "AS p ON p.th = w.th "
+        "SELECT p.corpusid AS corpusid, p.th AS th, p.title_norm AS title_norm, p.year AS year, "
+        "w.work_id AS work_id, w.year AS work_year, w.is_xpac AS is_xpac, w.unclear AS unclear "
+        "FROM ("
+        "SELECT w.th AS th, w.title_norm AS title_norm, w.work_id AS work_id, "
+        "w.year AS year, w.is_xpac AS is_xpac, w.unclear AS unclear "
+        f"FROM {TITLE_WORKS} AS w "
+        f"INNER JOIN ({kept_titles}) AS k ON k.th = w.th AND k.title_norm = w.title_norm "
+        "WHERE w.eligible) AS w "
+        "INNER JOIN ("
+        f"SELECT corpusid, th, title_norm, year FROM {TITLE_PAPERS} WHERE unmatched AND {_LONG}"
+        ") AS p ON p.th = w.th AND p.title_norm = w.title_norm "
         f"WHERE p.year IS NULL OR (w.year IS NOT NULL AND {_NEAR.format(a='p.year', b='w.year')})"
     )
     # The candidate is the one non-XPAC work, else the only work.
     picked = (
-        "SELECT corpusid, any(th) AS th, any(year) AS year, "
+        "SELECT corpusid, any(th) AS th, any(title_norm) AS title_norm, any(year) AS year, "
         "argMax(tuple(work_id, work_year, unclear), NOT is_xpac) AS pick "
         f"FROM ({pairs}) GROUP BY corpusid "
         "HAVING countIf(NOT is_xpac) = 1 OR count() = 1"
     )
     alone = (
-        f"SELECT c.corpusid FROM {TITLE_CANDIDATES} AS c INNER JOIN ("
-        f"SELECT th, year FROM {TITLE_PAPERS} WHERE th IN (SELECT th FROM {TITLE_CANDIDATES})"
-        ") AS s ON s.th = c.th "
+        f"SELECT c.corpusid AS corpusid FROM {TITLE_PAPERS} AS s "
+        f"INNER JOIN {TITLE_CANDIDATES} AS c ON s.th = c.th AND s.title_norm = c.title_norm "
         "WHERE c.year IS NULL OR c.work_year IS NULL OR s.year IS NULL "
         f"OR {_NEAR.format(a='s.year', b='c.work_year')} "
         "GROUP BY c.corpusid HAVING count() = 1"
     )
     taken = (
-        f"SELECT work_id FROM {xwalk} WHERE chosen "
-        f"AND work_id IN (SELECT work_id FROM {TITLE_CANDIDATES})"
+        f"SELECT DISTINCT x.work_id AS work_id FROM {xwalk} AS x "
+        f"INNER JOIN (SELECT DISTINCT work_id FROM {TITLE_CANDIDATES}) AS c "
+        "ON c.work_id = x.work_id WHERE x.chosen"
     )
     return [
         *(f"DROP TABLE IF EXISTS {table}" for table in TITLE_SCRATCH),
-        f"CREATE TABLE {TITLE_PAPERS} (th UInt64, corpusid UInt64, year Nullable(Int32), "
-        "chars UInt32, unmatched Bool) ENGINE = MergeTree ORDER BY th",
-        f"INSERT INTO {TITLE_PAPERS} (th, corpusid, year, chars, unmatched) "
-        "SELECT cityHash64(p.title_norm), p.corpusid, p.year, lengthUTF8(p.title_norm), "
-        f"NOT ifNull(m.matched, false) FROM (SELECT corpusid, {titled}, year FROM papers FINAL "
+        f"CREATE TABLE {TITLE_PAPERS} (th UInt64, title_norm String, corpusid UInt64, "
+        "year Nullable(Int32), chars UInt32, unmatched Bool) ENGINE = MergeTree ORDER BY th",
+        f"INSERT INTO {TITLE_PAPERS} (th, title_norm, corpusid, year, chars, unmatched) "
+        "SELECT cityHash64(p.title_norm), p.title_norm, p.corpusid, p.year, "
+        "lengthUTF8(p.title_norm), NOT ifNull(m.matched, false) "
+        f"FROM (SELECT corpusid, {titled}, year FROM papers FINAL "
         "WHERE is_deleted = 0 AND title_norm != '') AS p "
         f"LEFT JOIN (SELECT corpusid, true AS matched FROM {xwalk} WHERE rank = 1) AS m "
         f"ON m.corpusid = p.corpusid {settings}",
-        f"CREATE TABLE {TITLE_WORKS} (th UInt64, work_id UInt64, year Nullable(Int32), "
-        "is_xpac Bool, eligible Bool, unclear Bool) ENGINE = MergeTree ORDER BY th",
-        f"INSERT INTO {TITLE_WORKS} (th, work_id, year, is_xpac, eligible, unclear) "
-        "SELECT cityHash64(title_norm) AS th, work_id, publication_year, is_xpac, "
-        f"{eligible}, ifNull(type, 'other') = 'other' "
+        f"CREATE TABLE {TITLE_WORKS} (th UInt64, title_norm String, work_id UInt64, "
+        "year Nullable(Int32), is_xpac Bool, eligible Bool, unclear Bool) "
+        "ENGINE = MergeTree ORDER BY th",
+        f"INSERT INTO {TITLE_WORKS} (th, title_norm, work_id, year, is_xpac, eligible, unclear) "
+        "SELECT w.th, w.title_norm, w.work_id, w.publication_year, w.is_xpac, "
+        "w.eligible, w.unclear FROM ("
+        "SELECT cityHash64(title_norm) AS th, title_norm, work_id, publication_year, is_xpac, "
+        f"{eligible} AS eligible, ifNull(type, '') IN ('', 'other') AS unclear "
         "FROM (SELECT work_id, publication_year, is_xpac, is_paratext, type, doi_norm, "
         f"{titled} FROM openalex_works FINAL "
-        "WHERE is_deleted = 0 AND NOT removed AND title_norm != '') "
-        f"WHERE th IN (SELECT th FROM {TITLE_PAPERS} WHERE unmatched AND {_LONG}) {settings}",
-        f"CREATE TABLE {TITLE_CANDIDATES} (corpusid UInt64, th UInt64, year Nullable(Int32), "
-        "work_id UInt64, work_year Nullable(Int32)) ENGINE = MergeTree ORDER BY corpusid",
-        f"INSERT INTO {TITLE_CANDIDATES} (corpusid, th, year, work_id, work_year) "
-        f"SELECT corpusid, th, year, pick.1, pick.2 FROM ({picked}) "
+        "WHERE is_deleted = 0 AND NOT removed AND title_norm != '')) AS w "
+        "INNER JOIN ("
+        f"SELECT DISTINCT th, title_norm FROM {TITLE_PAPERS} WHERE unmatched AND {_LONG}"
+        f") AS u ON u.th = w.th AND u.title_norm = w.title_norm {settings}",
+        f"CREATE TABLE {TITLE_CANDIDATES} (corpusid UInt64, th UInt64, title_norm String, "
+        "year Nullable(Int32), work_id UInt64, work_year Nullable(Int32)) "
+        "ENGINE = MergeTree ORDER BY corpusid",
+        f"INSERT INTO {TITLE_CANDIDATES} (corpusid, th, title_norm, year, work_id, work_year) "
+        f"SELECT corpusid, th, title_norm, year, pick.1, pick.2 FROM ({picked}) "
         f"WHERE NOT pick.3 OR pick.2 = year {settings}",
         f"INSERT INTO {xwalk} ({XWALK_COLUMNS}) "
-        f"SELECT corpusid, work_id, CAST('title' AS {MATCH_KEY}), toUInt8(1), true, false "
-        f"FROM {TITLE_CANDIDATES} WHERE work_id NOT IN ({taken}) "
-        f"AND corpusid IN ({alone}) {settings}",
+        f"SELECT c.corpusid, c.work_id, CAST('title' AS {MATCH_KEY}), toUInt8(1), true, false "
+        f"FROM {TITLE_CANDIDATES} AS c "
+        f"INNER JOIN ({alone}) AS a ON a.corpusid = c.corpusid "
+        f"LEFT ANTI JOIN ({taken}) AS t ON t.work_id = c.work_id {settings}",
     ]
 
 
 def title_stats_sql(xwalk: str) -> str:
     """Candidates of the title step, those whose work an ID match took, and the matches."""
     return (
-        "SELECT count() AS candidates, countIf(work_id IN ("
-        f"SELECT work_id FROM {xwalk} WHERE chosen AND match_key != 'title' "
-        f"AND work_id IN (SELECT work_id FROM {TITLE_CANDIDATES}))) AS taken, "
+        "SELECT count() AS candidates, countIf(t.is_taken = 1) AS taken, "
         f"(SELECT count() FROM {xwalk} WHERE match_key = 'title') AS matched "
-        f"FROM {TITLE_CANDIDATES}"
+        f"FROM {TITLE_CANDIDATES} AS c LEFT JOIN ("
+        f"SELECT DISTINCT x.work_id AS work_id, toUInt8(1) AS is_taken FROM {xwalk} AS x "
+        f"INNER JOIN (SELECT DISTINCT work_id FROM {TITLE_CANDIDATES}) AS k "
+        "ON k.work_id = x.work_id WHERE x.chosen AND x.match_key != 'title'"
+        ") AS t ON t.work_id = c.work_id"
     )
 
 

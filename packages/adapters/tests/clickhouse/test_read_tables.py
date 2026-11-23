@@ -14,6 +14,7 @@ import pytest
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.crosswalk import TITLE_SCRATCH
 from openknowledge_adapters.clickhouse.read_tables import (
+    BEST_INVALIDATIONS,
     BYTES_PER_CITATION,
     BYTES_PER_SCRATCH_KEY,
     DELTA,
@@ -283,12 +284,16 @@ class FakeClickHouse:
                 written = self.counts[name] = self.touched[source]
             elif name in TITLE_SCRATCH:
                 written = 50
+            elif name == BEST_INVALIDATIONS:
+                written = 0
             elif name.endswith("_new"):
                 written = 100
             else:
                 written = self.touched[next(key for key, found in GROUPS.items() if name in found)]
             summary = json.dumps({"written_rows": written})
             return httpx.Response(200, headers={"X-ClickHouse-Summary": summary})
+        elif query.startswith("TRUNCATE TABLE"):
+            rows = []
         elif query.startswith("DELETE FROM"):
             assert params["query_id"] == "read-tables-delete"
             assert query.split()[2] in self.live
@@ -733,6 +738,7 @@ async def test_openalex_group_rebuilds_alone_and_records_its_release(
                 f"DELETE FROM {BEST}",
                 f"INSERT INTO {XWALK} ",
                 f"INSERT INTO {BEST} ",
+                f"INSERT INTO {BEST_INVALIDATIONS} ",
                 f"DROP TABLE IF EXISTS {DELTA['openalex']}",
                 "INSERT INTO applied",
             ],
@@ -747,3 +753,24 @@ async def test_openalex_group_rebuilds_alone_and_records_its_release(
             "partial_openalex": "openalex_works holds rows past its applied release",
             "no_abstracts": "abstracts holds no completed release; skipping openalex",
         }[case] in caplog.text
+
+
+async def test_title_scratch_is_dropped_when_title_matching_fails() -> None:
+    server = FakeClickHouse()
+    server.openalex_rows = 100
+    for source in (*S2, "abstracts"):
+        server.history.append(marker(source, RELEASE))
+    server.history += [marker(table, "2027-01-13", uuid) for table, uuid in OA_UUID.items()]
+    server.fail = lambda request: (
+        httpx.Response(500, text="synthetic title insert failure")
+        if request.url.params.get("query", request.content.decode()).startswith(
+            "INSERT INTO read_title_candidates "
+        )
+        else None
+    )
+    async with read_tables(server) as builder:
+        with pytest.raises(TableUnavailable):
+            await builder.build(PRODUCER, clock, full=True)
+    for table in TITLE_SCRATCH:
+        assert table not in server.staging
+        assert f"DROP TABLE IF EXISTS {table}" in server.events

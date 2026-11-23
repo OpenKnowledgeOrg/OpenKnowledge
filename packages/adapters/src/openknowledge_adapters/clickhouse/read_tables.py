@@ -41,6 +41,7 @@ from openknowledge_core.ingestion.read_tables import (
 )
 
 PAPERS, OUT, IN, XWALK, BEST = READ_TABLES
+BEST_INVALIDATIONS = "paper_abstract_best_invalidations"
 TABLES = READ_TABLES
 QUERY_ID = "citation-edges"  # Keep the recovery key stable across the rename.
 DELETE_QUERY_ID = "read-tables-delete"
@@ -84,8 +85,9 @@ BYTES_PER_PAPER = 100
 """Provisional free disk per papers row, pending a measured build."""
 BYTES_PER_XWALK = 40
 """Provisional free disk per papers row, pending a measured build."""
-BYTES_PER_TITLE_SCRATCH = 24
-"""(8 + 8 + 5 + 4 + 1) bytes per papers row of the title matching's scratch, uncompressed."""
+BYTES_PER_TITLE_SCRATCH = 120
+"""Provisional free disk per papers row for the title scratch tables (with normalised titles)
+and grace_hash spill files."""
 BYTES_PER_ABSTRACT = 1000
 """Provisional free disk per papers row, pending a measured build: at most one abstract per live
 paper, however many OpenAlex abstracts or unmerged versions the sources hold."""
@@ -184,19 +186,20 @@ def delta_sql(
     )
     # A paper first added as another's peer is added again once its own sources change.
     return [
-        f"CREATE TABLE IF NOT EXISTS {delta} (key UInt64, expanded Bool) "
+        f"CREATE TABLE IF NOT EXISTS {delta} (key UInt64, expanded Bool, displaced Bool) "
         "ENGINE = MergeTree ORDER BY key",
-        f"INSERT INTO {delta} (key, expanded) SELECT DISTINCT key, false FROM ({sources}) "
-        f"WHERE key NOT IN (SELECT key FROM {delta} WHERE NOT expanded) "
+        f"INSERT INTO {delta} (key, expanded, displaced) SELECT DISTINCT key, false, false "
+        f"FROM ({sources}) WHERE key NOT IN (SELECT key FROM {delta} WHERE NOT expanded) "
         f"LIMIT {max_keys + 1} {_settings(budget, single_thread=True)}",
-        # A paper losing its title match is rebuilt like a delta key, abstract included.
-        f"INSERT INTO {delta} (key, expanded) SELECT corpusid, NOT by_title "
+        # A paper losing its title match is rebuilt like a delta key, abstract included, and
+        # recorded for the weekly search diff.
+        f"INSERT INTO {delta} (key, expanded, displaced) SELECT corpusid, NOT by_title, by_title "
         f"FROM ({expansion_sql(delta)}) "
         f"{_settings(budget)}, {GRACE_HASH}",
     ]
 
 
-def apply_sql(group: str, budget: ReadTableBudget) -> list[str]:
+def apply_sql(group: str, budget: ReadTableBudget, end: ReleaseId | None = None) -> list[str]:
     """Replace the rows of the delta keys in ``group``'s read tables with their current rows.
 
     Deleting every delta key first makes a rerun after a partial run reach the same state.
@@ -221,11 +224,19 @@ def apply_sql(group: str, budget: ReadTableBudget) -> list[str]:
     selects = {
         table: special.get(table, f"{SOURCES[table]} AND {touched[table]}") for table in tables
     }
-    return deletes + [
+    inserts = [
         f"INSERT INTO {table} ({COLUMNS[table]}) {selects[table]} "
         f"{_settings(budget)}, {BLOCKS[table]}"
         for table in tables
     ]
+    if BEST in tables and end is not None:
+        release = _RELEASE.validate_python(end)
+        inserts.append(
+            f"INSERT INTO {BEST_INVALIDATIONS} (corpusid, source_release) "
+            f"SELECT DISTINCT key, toDate('{release}') FROM {DELTA[group]} WHERE displaced "
+            f"{_settings(budget)}"
+        )
+    return deletes + inserts
 
 
 def in_only_sql(budget: ReadTableBudget) -> list[str]:
@@ -606,7 +617,7 @@ class ClickHouseReadTables:
                 log.info("the update drops %s title matches", lost[0]["rows"])
         async with self._stage(f"read tables: {source} apply"):
             written: dict[str, int] = {}
-            for statement in apply_sql(source, budget):
+            for statement in apply_sql(source, budget, end):
                 rows = await self._run(statement)
                 if statement.startswith("INSERT"):
                     written[statement.split()[2]] = rows
@@ -687,6 +698,8 @@ class ClickHouseReadTables:
             # As in an update, a kept delta never outlives the markers of the build that used it.
             for group in KEPT_DELTA.intersection(groups):
                 await self._client.post(f"DROP TABLE IF EXISTS {DELTA[group]}")
+            if BEST in tables:
+                await self._client.post(f"TRUNCATE TABLE IF EXISTS {BEST_INVALIDATIONS}")
             markers = [
                 await self._marker(table, group_release(group, releases), None, producer, clock)
                 for group in groups
@@ -720,20 +733,22 @@ class ClickHouseReadTables:
         """Add the title matches to the crosswalk copy; return the rows added."""
         target = f"{XWALK}_new"
         rows = 0
-        for statement in title_sql(target, f"{_settings(budget)}, {BLOCKS[XWALK]}"):
-            written = await self._run(statement)
-            if statement.startswith(f"INSERT INTO {target} "):
-                rows += written
-        stats = (await self._client.rows(f"{title_stats_sql(target)} {_settings(budget)}"))[0]
-        log.info(
-            "title matching: %s candidates, %s on a work an ID match took (likely duplicate "
-            "papers), %s matched",
-            stats["candidates"],
-            stats["taken"],
-            stats["matched"],
-        )
-        for table in TITLE_SCRATCH:
-            await self._client.post(f"DROP TABLE IF EXISTS {table}")
+        try:
+            for statement in title_sql(target, f"{_settings(budget)}, {BLOCKS[XWALK]}"):
+                written = await self._run(statement)
+                if statement.startswith(f"INSERT INTO {target} "):
+                    rows += written
+            stats = (await self._client.rows(f"{title_stats_sql(target)} {_settings(budget)}"))[0]
+            log.info(
+                "title matching: %s candidates, %s on a work an ID match took (likely duplicate "
+                "papers), %s matched",
+                stats["candidates"],
+                stats["taken"],
+                stats["matched"],
+            )
+        finally:
+            for table in TITLE_SCRATCH:
+                await self._client.post(f"DROP TABLE IF EXISTS {table}")
         return rows
 
     async def _run(self, statement: str) -> int:

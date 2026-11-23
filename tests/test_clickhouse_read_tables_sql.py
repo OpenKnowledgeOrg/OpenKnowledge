@@ -465,7 +465,7 @@ def _work(
 ) -> str:
     return (
         f"({work_id}, {f"'{doi}'" if doi else 'NULL'}, '{TITLES[key].upper()}.', "
-        f"{'NULL' if year is None else year}, {f"'{kind}'" if kind else 'NULL'}, "
+        f"{'NULL' if year is None else year}, {'NULL' if kind is None else f"'{kind}'"}, "
         f"{int(xpac)}, {int(paratext)}, 1, 0, '2026-10-01', 0)"
     )
 
@@ -496,11 +496,13 @@ def test_title_matches_take_unique_free_works_only(tmp_path: Path) -> None:
         _paper(13, 10, 2020),  # two XPAC works
         _paper(14, 11, 2020),  # data deposits, paratext and a dataset copy are ignored
         _paper(16, 13, 2020),  # year two apart
-        _paper(17, 14, 2020),  # no clear type and another year
-        _paper(18, 15, 2020),  # no clear type, same year: matched
+        _paper(17, 14, 2020),  # NULL type and another year
+        _paper(18, 15, 2020),  # 'other' type, same year: matched
         _paper(19, 16, 2020, doi="10.1/nineteen"),  # has an ID candidate already
         _paper(21, 18, None),  # no year and a title under 40 characters
         _paper(22, 21, 2020, doi="10.1/twentytwo"),  # an ID match: no title match on top
+        _paper(23, 23, 2020),  # empty-string type and another year
+        _paper(24, 24, 2020),  # empty-string type, same year: matched
         "(15, {}, 'Short Title', 2020, '2026-10-01', 0)",  # under 20 characters
         f"(20, {{}}, '{long_title.title()}', NULL, '2026-10-01', 0)",  # no year: matched
     ]
@@ -535,6 +537,8 @@ def test_title_matches_take_unique_free_works_only(tmp_path: Path) -> None:
         _work(1801, 18, 2020),
         _work(2101, 21, 2020),
         _work(2201, 22, 2020, doi="10.1/twentytwo"),
+        _work(2301, 23, 2021, ""),
+        _work(2401, 24, 2020, ""),
         _work(15010, 1, None),  # no year: outside every dated window
         "(150, NULL, 'Short title', 2020, 'article', 0, 0, 1, 0, '2026-10-01', 0)",
         f"(2001, NULL, '{long_title}', 2010, 'article', 0, 0, 1, 0, '2026-10-01', 0)",
@@ -562,6 +566,7 @@ def test_title_matches_take_unique_free_works_only(tmp_path: Path) -> None:
         (19, 1601, "doi", 1, True, False),
         (20, 2001, "title", 1, True, False),
         (22, 2201, "doi", 1, True, False),
+        (24, 2401, "title", 1, True, False),
     ]
 
 
@@ -569,7 +574,7 @@ def test_title_matches_take_unique_free_works_only(tmp_path: Path) -> None:
 def test_an_update_drops_a_title_match_whose_work_an_id_match_takes(tmp_path: Path) -> None:
     run = [
         *delta_sql("openalex", "2026-10-01", "2026-10-02", 100, BUDGET),
-        *apply_sql("openalex", BUDGET),
+        *apply_sql("openalex", BUDGET, "2026-10-02"),
     ]
     statements = ";\n".join([*run[:-1], *run, *run])
     group = GROUPS["openalex"]
@@ -611,3 +616,26 @@ def test_an_update_drops_a_title_match_whose_work_an_id_match_takes(tmp_path: Pa
         (3, 30),
         (4, 20),
     ]
+    # The weekly search diff must also pick up displaced paper 2 so its stale abstract is cleared.
+    diff_sql = f"""
+        {up()}
+        SYSTEM STOP MERGES papers;
+        INSERT INTO papers ({PAPER_COLUMNS})
+        VALUES {_paper(1, 1, 2020)}, {_paper(2, 2, 2020)}, {_paper(3, 3, 2020)};
+        INSERT INTO openalex_works ({WORK_COLUMNS})
+        VALUES {_work(10, 1, 2020)}, {_work(20, 2, 2020, doi="10.1/d20")}, {_work(30, 3, 2020)};
+        INSERT INTO openalex_abstracts (work_id, abstract, source_release, is_deleted)
+        VALUES (10, 'OA ten', '2026-10-01', 0), (20, 'OA twenty', '2026-10-01', 0),
+               (30, 'OA thirty', '2026-10-01', 0);
+        {_full_build("_new", group)}
+        {_publish(group)}
+        INSERT INTO papers ({PAPER_COLUMNS})
+        VALUES (4, {{'DOI': '10.1/d20'}}, 'Another Title Of Some Length', 2020, '2026-10-02', 0);
+        {";\n".join(run)};
+        {DIFF_QUERY} FORMAT JSONEachRow;
+    """
+    diff_rows = clickhouse_local(diff_sql, tmp_path, low="0", high="9", from_release="2026-10-01")
+    assert {row["corpusid"]: row["best_abstract"] for row in diff_rows} == {
+        2: None,
+        4: "OA twenty",
+    }
