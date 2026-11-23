@@ -46,12 +46,16 @@ def down(runs: int = 1) -> str:
 def run(sql: str, workdir: Path, **params: str) -> subprocess.CompletedProcess[str]:
     """Run ``sql`` with query parameters, returning the process even when it fails."""
     assert CLICKHOUSE is not None, "CI runs these checks, so it must put clickhouse on the PATH"
+    workdir.mkdir(parents=True, exist_ok=True)
+    # Pass via --queries-file so large multi-statement SQL fixtures never hit Linux MAX_ARG_STRLEN.
+    queries_file = workdir / "queries.sql"
+    queries_file.write_text(sql)
     # Whether JSON output quotes 64-bit integers is a default that changed between releases, so
     # it is pinned: a UInt64 comes back as a JSON number.
     args = ["local", "--path", str(workdir), "--output_format_json_quote_64bit_integers=0"]
     args += [f"--param_{name}={value}" for name, value in params.items()]
     return subprocess.run(
-        [CLICKHOUSE, *args, "--multiquery", "--query", sql],
+        [CLICKHOUSE, *args, "--queries-file", str(queries_file)],
         stdin=subprocess.DEVNULL,  # a piped stdin would be read as data for the INSERTs
         capture_output=True,
         text=True,

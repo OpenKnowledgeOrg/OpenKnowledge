@@ -634,7 +634,9 @@ def test_an_update_drops_a_title_match_whose_work_an_id_match_takes(tmp_path: Pa
         {";\n".join(run)};
         {DIFF_QUERY} FORMAT JSONEachRow;
     """
-    diff_rows = clickhouse_local(diff_sql, tmp_path, low="0", high="9", from_release="2026-10-01")
+    diff_rows = clickhouse_local(
+        diff_sql, tmp_path / "diff", low="0", high="9", from_release="2026-10-01"
+    )
     assert {row["corpusid"]: row["best_abstract"] for row in diff_rows} == {
         2: None,
         4: "OA twenty",
