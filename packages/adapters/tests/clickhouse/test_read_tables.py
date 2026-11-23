@@ -292,7 +292,7 @@ class FakeClickHouse:
                 written = self.touched[next(key for key, found in GROUPS.items() if name in found)]
             summary = json.dumps({"written_rows": written})
             return httpx.Response(200, headers={"X-ClickHouse-Summary": summary})
-        elif query.startswith("TRUNCATE TABLE"):
+        elif query.startswith("TRUNCATE TABLE") or query.startswith("ALTER TABLE"):
             rows = []
         elif query.startswith("DELETE FROM"):
             assert params["query_id"] == "read-tables-delete"

@@ -188,6 +188,7 @@ def delta_sql(
     return [
         f"CREATE TABLE IF NOT EXISTS {delta} (key UInt64, expanded Bool, displaced Bool) "
         "ENGINE = MergeTree ORDER BY key",
+        f"ALTER TABLE {delta} ADD COLUMN IF NOT EXISTS displaced Bool DEFAULT false",
         f"INSERT INTO {delta} (key, expanded, displaced) SELECT DISTINCT key, false, false "
         f"FROM ({sources}) WHERE key NOT IN (SELECT key FROM {delta} WHERE NOT expanded) "
         f"LIMIT {max_keys + 1} {_settings(budget, single_thread=True)}",
@@ -738,7 +739,11 @@ class ClickHouseReadTables:
                 written = await self._run(statement)
                 if statement.startswith(f"INSERT INTO {target} "):
                     rows += written
-            stats = (await self._client.rows(f"{title_stats_sql(target)} {_settings(budget)}"))[0]
+            stats = (
+                await self._client.rows(
+                    f"{title_stats_sql(target)} {_settings(budget)}, {GRACE_HASH}"
+                )
+            )[0]
             log.info(
                 "title matching: %s candidates, %s on a work an ID match took (likely duplicate "
                 "papers), %s matched",
