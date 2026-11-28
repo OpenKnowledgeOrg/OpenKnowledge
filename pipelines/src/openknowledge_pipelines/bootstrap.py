@@ -411,6 +411,7 @@ async def open_read_tables(
         read_table_stage=stage or observer.stage,
         read_tables_max_delta_share=settings.read_tables_max_delta_share,
         read_tables_max_delta_keys=settings.read_tables_max_delta_keys,
+        read_tables_memory_share=settings.read_tables_memory_share,
     ) as ch:
         yield ch.read_tables
 

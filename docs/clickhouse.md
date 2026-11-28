@@ -38,6 +38,9 @@ the keys the diffs touched are deleted from them and inserted again from the sou
 `--full`. A diff touching more than `OKP_READ_TABLES_MAX_DELTA_SHARE` of a read table's rows (0.1, the
 most a full rebuild may drop) or more than `OKP_READ_TABLES_MAX_DELTA_KEYS` keys (100000000, which an
 update holds in memory) rebuilds in full.
+Read-table builds and inserts may use half of RAM, at most 0.6 of the server memory limit, which leaves
+room for queries running beside the build. `OKP_READ_TABLES_MEMORY_SHARE` (0.1 to 0.95)
+replaces that with a share of the limit; a budget under 1 GB is refused.
 Before collecting delta keys, an in-place update requires 5 GiB plus 16 bytes per configured
 maximum key (including the over-cap sentinel), about 6.5 GiB at the default cap. After collection,
 it checks free disk again for the measured update rows plus 5 GiB. If it fails after its deletes,

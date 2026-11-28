@@ -127,21 +127,30 @@ _RELEASE = TypeAdapter(ReleaseId)
 log = logging.getLogger(__name__)
 
 
-def build_budget(limit: int, ratio: float, cores: int) -> ReadTableBudget:
-    """Use half of RAM, but at most 60% of the server memory limit, rounded down to whole GB.
+def build_budget(
+    limit: int, ratio: float, cores: int, share: float | None = None
+) -> ReadTableBudget:
+    """Use ``share`` of the server memory limit, rounded down to whole GB.
 
-    RAM is the limit over its RAM ratio; a zero ratio means the limit was set alone. Budget
-    4 GB per thread for headroom over the two-thread probe (~2 GiB total), and spill at half
-    the query cap to leave space for merging spilled data.
+    Without a share, use half of RAM but at most 60% of the limit, which leaves room for
+    queries running beside the build. RAM is the limit over its RAM ratio; a zero ratio means
+    the limit was set alone. Budget 4 GB per thread for headroom over the two-thread probe
+    (~2 GiB total), and spill at half the query cap to leave space for merging spilled data.
     """
     if limit <= 0 or ratio < 0 or cores <= 0:
         raise TableRejected("ClickHouse reported an invalid memory limit or CPU count")
-    cap = limit * 3 // 5
-    if ratio > 0:
-        cap = min(cap, int(limit / ratio) // 2)
+    if share is not None:
+        cap = round(limit * share)
+    else:
+        cap = limit * 3 // 5
+        if ratio > 0:
+            cap = min(cap, int(limit / ratio) // 2)
     memory = cap // GB * GB
     if memory <= 0:
-        raise TableRejected(f"ClickHouse memory limit {limit} is too small for read tables")
+        share_note = f" at memory share {share}" if share is not None else ""
+        raise TableRejected(
+            f"ClickHouse memory limit {limit}{share_note} is too small for read tables"
+        )
     return ReadTableBudget(
         memory_bytes=memory,
         max_threads=max(1, min(cores, memory // (4 * GB))),
@@ -261,6 +270,7 @@ class ClickHouseReadTables:
         stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
         max_delta_share: float = 0.1,
         max_delta_keys: int = 100_000_000,
+        memory_share: float | None = None,
     ) -> None:
         self._client = client
         self._tables = tables
@@ -271,6 +281,7 @@ class ClickHouseReadTables:
         row there, so the default never drops more than a full rebuild would keep."""
         self._max_delta_keys = max_delta_keys
         """Touched keys over this count rebuild in full: an update holds them all in memory."""
+        self._memory_share = memory_share
 
     async def is_current(self, releases: Mapping[str, ReleaseId]) -> bool:
         """Whether a build would change nothing; a group it would skip is not checked."""
@@ -324,7 +335,12 @@ class ClickHouseReadTables:
         if not rows:
             raise TableRejected("ClickHouse did not report server settings for read tables")
         row = rows[0]
-        return build_budget(int(row["memory_limit"]), float(row["memory_ratio"]), int(row["cores"]))
+        return build_budget(
+            int(row["memory_limit"]),
+            float(row["memory_ratio"]),
+            int(row["cores"]),
+            self._memory_share,
+        )
 
     async def build(
         self, producer: Producer, clock: Callable[[], datetime], *, full: bool = False
