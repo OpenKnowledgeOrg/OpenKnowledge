@@ -43,20 +43,24 @@ FULL, INCREMENTAL, CURRENT = ReadTablesPath.FULL, ReadTablesPath.INCREMENTAL, Re
 
 
 @pytest.mark.parametrize(
-    ("limit", "ratio", "cores", "memory", "threads"),
+    ("limit", "ratio", "cores", "memory", "threads", "share"),
     [
-        (14_760_000_000, 0.9, 2, 8 * 10**9, 2),
+        (14_760_000_000, 0.9, 2, 8 * 10**9, 2, None),
         # e2-highmem-4: 28 GiB server limit.
-        (30_064_771_072, 0.9, 4, 16 * 10**9, 4),
-        (230_400_000_000, 0.9, 64, 128 * 10**9, 32),
-        (230_400_000_000, 0.9, 8, 128 * 10**9, 8),
+        (30_064_771_072, 0.9, 4, 16 * 10**9, 4, None),
+        # A configured share replaces the default caps.
+        (30_064_771_072, 0.9, 4, 24 * 10**9, 4, 0.8),
+        (230_400_000_000, 0.9, 64, 128 * 10**9, 32, None),
+        (230_400_000_000, 0.9, 8, 128 * 10**9, 8, None),
         # An explicit cap below ratio x RAM: stay under the server's own limit.
-        (4 * 10**9, 0.4, 2, 2 * 10**9, 1),
-        (10 * 10**9, 0, 4, 6 * 10**9, 1),
+        (4 * 10**9, 0.4, 2, 2 * 10**9, 1, None),
+        (10 * 10**9, 0, 4, 6 * 10**9, 1, None),
     ],
 )
-def test_build_budget(limit: int, ratio: float, cores: int, memory: int, threads: int) -> None:
-    assert build_budget(limit, ratio, cores) == ReadTableBudget(
+def test_build_budget(
+    limit: int, ratio: float, cores: int, memory: int, threads: int, share: float | None
+) -> None:
+    assert build_budget(limit, ratio, cores, share) == ReadTableBudget(
         memory_bytes=memory, max_threads=threads, spill_bytes=memory // 2
     )
 

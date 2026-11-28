@@ -51,6 +51,7 @@ async def connect(
     read_table_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
     read_tables_max_delta_share: float = 0.1,
     read_tables_max_delta_keys: int = 100_000_000,
+    read_tables_memory_share: float | None = None,
 ) -> AsyncGenerator[ClickHouse, None]:
     http = httpx.AsyncClient(
         base_url=str(config.url),
@@ -74,6 +75,7 @@ async def connect(
                 read_table_stage,
                 read_tables_max_delta_share,
                 read_tables_max_delta_keys,
+                read_tables_memory_share,
             ),
             tables=tables,
             applied=applied,
