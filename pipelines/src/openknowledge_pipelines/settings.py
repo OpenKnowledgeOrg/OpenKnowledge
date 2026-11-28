@@ -68,7 +68,7 @@ class LoadSettings(ClickHouseSettings):
     drop more rows than a full rebuild is allowed to."""
     read_tables_max_delta_keys: PositiveInt = 100_000_000
     """Diffs touching more keys than this rebuild in full, since an update holds them in memory."""
-    read_tables_memory_share: float | None = Field(None, gt=0, le=0.95)
+    read_tables_memory_share: float | None = Field(None, ge=0.1, le=0.95)
     """Share of the ClickHouse server memory limit one read-table query may use. Unset keeps
     half of RAM, at most 0.6 of the limit, to leave room for queries running beside the build."""
     openalex_load_parallelism: int = Field(1, ge=1, le=8)
