@@ -140,14 +140,17 @@ def build_budget(
     if limit <= 0 or ratio < 0 or cores <= 0:
         raise TableRejected("ClickHouse reported an invalid memory limit or CPU count")
     if share is not None:
-        cap = int(limit * share)
+        cap = round(limit * share)
     else:
         cap = limit * 3 // 5
         if ratio > 0:
             cap = min(cap, int(limit / ratio) // 2)
     memory = cap // GB * GB
     if memory <= 0:
-        raise TableRejected(f"ClickHouse memory limit {limit} is too small for read tables")
+        share_note = f" at memory share {share}" if share is not None else ""
+        raise TableRejected(
+            f"ClickHouse memory limit {limit}{share_note} is too small for read tables"
+        )
     return ReadTableBudget(
         memory_bytes=memory,
         max_threads=max(1, min(cores, memory // (4 * GB))),

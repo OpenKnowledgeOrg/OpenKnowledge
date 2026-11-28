@@ -50,6 +50,7 @@ FULL, INCREMENTAL, CURRENT = ReadTablesPath.FULL, ReadTablesPath.INCREMENTAL, Re
         (30_064_771_072, 0.9, 4, 16 * 10**9, 4, None),
         # A configured share replaces the default caps.
         (30_064_771_072, 0.9, 4, 24 * 10**9, 4, 0.8),
+        (50 * 10**9, 0.9, 8, 29 * 10**9, 7, 0.58),
         (230_400_000_000, 0.9, 64, 128 * 10**9, 32, None),
         (230_400_000_000, 0.9, 8, 128 * 10**9, 8, None),
         # An explicit cap below ratio x RAM: stay under the server's own limit.
